@@ -35,7 +35,7 @@ scalar_extractor = LlmAgent(
 
 tabular_extractor = LlmAgent(
     name="tabular_extractor",
-    model="gemini-3.5-pro",
+    model="gemini-3.5-flash",
     instruction=(
         "You strictly parse markdown tables from retrieved document chunks into "
         "structured JSON arrays. Use search_tool with the table name and "
@@ -51,7 +51,7 @@ tabular_extractor = LlmAgent(
 
 critic_agent = LlmAgent(
     name="critic_agent",
-    model="gemini-3.5-pro",
+    model="gemini-3.5-flash",
     instruction=(
         "Review the compiled extraction JSON against the template requirements and "
         "mathematical/accounting constraints. Check examples such as Total Assets "
