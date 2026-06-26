@@ -51,6 +51,15 @@ type RuntimeLog = {
   text: string;
 };
 
+type TokenCostMetrics = {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  input_cost: number;
+  output_cost: number;
+  total_cost: number;
+};
+
 const initialFields: FieldCard[] = [
   {
     id: 1,
@@ -265,7 +274,74 @@ function LogsPanel({ logs, isLoading, compact = false }: { logs: RuntimeLog[]; i
   );
 }
 
-function ResultsPanel({ results, onDownload, onSendToMcp }: { results: ExtractionResult[]; onDownload: (format: "csv" | "json") => void; onSendToMcp: () => void }) {
+const parseNumberMetric = (value: unknown) => {
+  const numericValue = typeof value === "string" ? Number(value) : value;
+  return typeof numericValue === "number" && Number.isFinite(numericValue) ? numericValue : 0;
+};
+
+const normalizeTokenCostMetrics = (value: unknown): TokenCostMetrics | null => {
+  if (!value || typeof value !== "object") return null;
+
+  const metrics = value as Record<string, unknown>;
+  const inputTokens = parseNumberMetric(metrics.input_tokens);
+  const outputTokens = parseNumberMetric(metrics.output_tokens);
+  const totalTokens = parseNumberMetric(metrics.total_tokens) || inputTokens + outputTokens;
+  const inputCost = parseNumberMetric(metrics.input_cost);
+  const outputCost = parseNumberMetric(metrics.output_cost);
+  const totalCost = parseNumberMetric(metrics.total_cost) || inputCost + outputCost;
+
+  return {
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    total_tokens: totalTokens,
+    input_cost: inputCost,
+    output_cost: outputCost,
+    total_cost: totalCost,
+  };
+};
+
+const formatTokenCount = (value: number) => new Intl.NumberFormat("en-US").format(Math.round(value));
+const formatCost = (value: number) => `$${value.toFixed(4)}`;
+
+function CostMetricsModal({ metrics, onClose }: { metrics: TokenCostMetrics; onClose: () => void }) {
+  const rows = [
+    { label: "Input", tokens: metrics.input_tokens, cost: metrics.input_cost },
+    { label: "Output", tokens: metrics.output_tokens, cost: metrics.output_cost },
+    { label: "Total", tokens: metrics.total_tokens, cost: metrics.total_cost },
+  ];
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="cost-metrics-title">
+      <div className="w-full max-w-md overflow-hidden rounded-3xl border border-cyan-300/30 bg-slate-950 shadow-2xl shadow-cyan-950/40">
+        <div className="flex items-start justify-between border-b border-slate-800 bg-cyan-300/10 p-5">
+          <div>
+            <p className="text-xs font-black uppercase tracking-[0.24em] text-cyan-200">Extraction Cost</p>
+            <h2 id="cost-metrics-title" className="mt-2 text-xl font-black text-white">Token & cost metrics</h2>
+          </div>
+          <button onClick={onClose} className="rounded-lg p-2 text-slate-400 transition hover:bg-slate-800 hover:text-slate-100" aria-label="Close cost metrics">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+        <div className="space-y-3 p-5">
+          {rows.map((row) => (
+            <div key={row.label} className={`rounded-2xl border p-4 ${row.label === "Total" ? "border-emerald-300/40 bg-emerald-300/10" : "border-slate-800 bg-slate-900/70"}`}>
+              <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">{row.label}</p>
+              <div className="mt-2 flex items-end justify-between gap-3">
+                <div>
+                  <p className="font-mono text-lg font-black text-slate-50">{formatTokenCount(row.tokens)}</p>
+                  <p className="text-xs text-slate-400">tokens</p>
+                </div>
+                <p className="font-mono text-lg font-black text-cyan-100">{formatCost(row.cost)}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ResultsPanel({ results, tokenCostMetrics, onViewCostMetrics, onDownload, onSendToMcp }: { results: ExtractionResult[]; tokenCostMetrics: TokenCostMetrics | null; onViewCostMetrics: () => void; onDownload: (format: "csv" | "json") => void; onSendToMcp: () => void }) {
   return (
     <section className="mt-4 rounded-2xl border border-slate-700 bg-slate-900/80 p-4">
       <div className="mb-3 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
@@ -274,6 +350,7 @@ function ResultsPanel({ results, onDownload, onSendToMcp }: { results: Extractio
           <span className="text-xs text-slate-500">{results.length} fields · schema v2.1</span>
         </div>
         <div className="flex flex-wrap gap-2">
+          <button onClick={onViewCostMetrics} disabled={!tokenCostMetrics} className="inline-flex items-center gap-2 rounded-lg border border-emerald-300/30 bg-emerald-300/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.16em] text-emerald-100 hover:border-emerald-200 disabled:cursor-not-allowed disabled:opacity-40" title={tokenCostMetrics ? "View token and cost metrics for this extraction" : "Run an extraction to view token and cost metrics"}><CircleDollarSign className="h-4 w-4" /> Cost</button>
           <button onClick={() => onDownload("csv")} disabled={results.length === 0} className="inline-flex items-center gap-2 rounded-lg border border-cyan-300/30 bg-cyan-300/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.16em] text-cyan-100 hover:border-cyan-200 disabled:cursor-not-allowed disabled:opacity-40"><Download className="h-4 w-4" /> CSV</button>
           <button onClick={() => onDownload("json")} disabled={results.length === 0} className="inline-flex items-center gap-2 rounded-lg border border-cyan-300/30 bg-cyan-300/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.16em] text-cyan-100 hover:border-cyan-200 disabled:cursor-not-allowed disabled:opacity-40"><FileJson className="h-4 w-4" /> JSON</button>
           <button onClick={onSendToMcp} className="inline-flex items-center gap-2 rounded-lg border border-amber-300/30 bg-amber-300/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.16em] text-amber-100 hover:border-amber-200"><DatabaseZap className="h-4 w-4" /> MCP</button>
@@ -314,6 +391,8 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [showDebugPanel, setShowDebugPanel] = useState(false);
   const [templateName, setTemplateName] = useState("BExtractor Template");
+  const [tokenCostMetrics, setTokenCostMetrics] = useState<TokenCostMetrics | null>(null);
+  const [isCostMetricsOpen, setIsCostMetricsOpen] = useState(false);
   const addField = () => setFields((current) => [...current, { id: Date.now(), name: "", definition: "", routeType: "Scalar", dataType: "String" }]);
   const updateField = (updated: FieldCard) => setFields((current) => current.map((field) => (field.id === updated.id ? updated : field)));
 
@@ -378,6 +457,8 @@ export default function Home() {
     if (["result", "complete", "completed", "done", "final"].includes(normalizedEvent) || data.results || data.structured_json || data.extracted_values) {
       const results = mapFinalPayloadToResults(data);
       if (results.length > 0) setExtractionResults(results);
+      const metrics = normalizeTokenCostMetrics(data.token_cost_metrics);
+      if (metrics) setTokenCostMetrics(metrics);
       appendLog("success", "Extraction stream completed and field cards were updated.");
       setIsLoading(false);
     }
@@ -457,6 +538,8 @@ export default function Home() {
     setIsLoading(true);
     setRuntimeLogs([]);
     setExtractionResults([]);
+    setTokenCostMetrics(null);
+    setIsCostMetricsOpen(false);
 
     const fieldPayload = fields.map((field) => ({
       id: String(field.id),
@@ -500,6 +583,7 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-[#060913] text-slate-100">
+      {isCostMetricsOpen && tokenCostMetrics && <CostMetricsModal metrics={tokenCostMetrics} onClose={() => setIsCostMetricsOpen(false)} />}
       <div className="flex min-h-screen">
         <section className={`${showDebugPanel ? "w-full xl:w-[60%] xl:border-r" : "w-full"} border-cyan-300/10 bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.14),transparent_32%),linear-gradient(180deg,#0f172a,#070b14)] p-5 transition-all duration-500`}>
           <header className="mb-5 flex items-center justify-between">
@@ -527,7 +611,7 @@ export default function Home() {
           </div>
           {!showDebugPanel && (
             <div className={`mx-auto max-w-6xl transition-all duration-700 ${isLoading ? "translate-y-2 opacity-0" : "translate-y-0 opacity-100"}`}>
-              <ResultsPanel results={extractionResults} onDownload={handleDownloadOutput} onSendToMcp={handleSendToMcp} />
+              <ResultsPanel results={extractionResults} tokenCostMetrics={tokenCostMetrics} onViewCostMetrics={() => setIsCostMetricsOpen(true)} onDownload={handleDownloadOutput} onSendToMcp={handleSendToMcp} />
             </div>
           )}
           <PdfPreview file={file} />
@@ -552,7 +636,7 @@ export default function Home() {
             <div><p className="text-sm font-semibold text-slate-100">Runtime Extraction Logs & Results</p><p className="text-xs text-slate-500">Validation agent monitoring financial extraction output.</p></div>
           </div>
           <LogsPanel logs={runtimeLogs} isLoading={isLoading} />
-          <div className={`transition-all duration-700 ${isLoading ? "translate-y-2 opacity-0" : "translate-y-0 opacity-100"}`}><ResultsPanel results={extractionResults} onDownload={handleDownloadOutput} onSendToMcp={handleSendToMcp} /></div>
+          <div className={`transition-all duration-700 ${isLoading ? "translate-y-2 opacity-0" : "translate-y-0 opacity-100"}`}><ResultsPanel results={extractionResults} tokenCostMetrics={tokenCostMetrics} onViewCostMetrics={() => setIsCostMetricsOpen(true)} onDownload={handleDownloadOutput} onSendToMcp={handleSendToMcp} /></div>
           <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-950/80 p-4 text-xs text-slate-400">
             <ClipboardList className="mb-2 h-4 w-4 text-cyan-300" /> Audit trail sealed with immutable run metadata. Source citations remain attached to every field-level decision.
           </div>
