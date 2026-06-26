@@ -96,6 +96,13 @@ def _safe_node_name(prefix: str, value: str) -> str:
 
 def _seed_state(ctx, node_input: Any) -> dict[str, Any]:
     payload = node_input if isinstance(node_input, dict) else {}
+    if not payload and hasattr(node_input, "parts"):
+        text = "".join(getattr(part, "text", "") or "" for part in node_input.parts)
+        try:
+            parsed = json.loads(text) if text else {}
+            payload = parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            payload = {}
     template = payload.get("template_payload", payload)
     ctx.state["template_payload"] = template
     ctx.state["extraction_results"] = {}
