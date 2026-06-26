@@ -15,6 +15,7 @@ import {
   Play,
   Plus,
   RefreshCw,
+  Search,
   ShieldCheck,
   TerminalSquare,
   UploadCloud,
@@ -182,7 +183,48 @@ function FieldCardEditor({ field, result, onChange, onRemove }: { field: FieldCa
   );
 }
 
-function LogsPanel({ logs, isLoading }: { logs: RuntimeLog[]; isLoading: boolean }) {
+function BExtractorLogo({ isActive }: { isActive: boolean }) {
+  return (
+    <div className="relative flex h-28 w-28 items-center justify-center" aria-label="BExtractor animated processing logo">
+      <div className={`absolute inset-0 rounded-full bg-[conic-gradient(from_90deg,rgba(34,211,238,0),rgba(34,211,238,0.85),rgba(16,185,129,0.75),rgba(34,211,238,0))] p-px ${isActive ? "animate-spin" : ""}`}>
+        <div className="h-full w-full rounded-full bg-slate-950" />
+      </div>
+      <div className={`absolute inset-3 rounded-full border border-cyan-300/20 bg-cyan-300/5 shadow-[0_0_40px_rgba(34,211,238,0.22)] ${isActive ? "animate-pulse" : ""}`} />
+      <svg viewBox="0 0 96 96" className="relative h-20 w-20 drop-shadow-[0_0_18px_rgba(34,211,238,0.45)]" role="img" aria-hidden="true">
+        <path d="M29 12h25l15 15v48a9 9 0 0 1-9 9H29a9 9 0 0 1-9-9V21a9 9 0 0 1 9-9Z" className="fill-slate-900 stroke-cyan-200/80" strokeWidth="3" />
+        <path d="M54 12v14a5 5 0 0 0 5 5h10" className="fill-none stroke-emerald-300/80" strokeWidth="3" strokeLinecap="round" />
+        <path d="M33 37h20M33 48h14M33 59h11" className="stroke-slate-400" strokeWidth="3" strokeLinecap="round" />
+        <path d="M47 70c4-8 8-16 12-24h-9l5-16-18 26h10l-4 14Z" className="fill-emerald-300 stroke-emerald-100" strokeWidth="1.5" strokeLinejoin="round" />
+        <circle cx="61" cy="61" r="11" className="fill-slate-950/80 stroke-cyan-200" strokeWidth="4" />
+        <path d="m69 69 11 11" className="stroke-cyan-200" strokeWidth="5" strokeLinecap="round" />
+        <circle cx="22" cy="24" r="2.5" className="fill-cyan-300" />
+        <circle cx="76" cy="44" r="2.5" className="fill-emerald-300" />
+      </svg>
+    </div>
+  );
+}
+
+function ExtractionLoadingPanel({ logs, isLoading }: { logs: RuntimeLog[]; isLoading: boolean }) {
+  const activeLog = logs.at(-1)?.text ?? "Initializing extraction stream...";
+
+  return (
+    <section className={`mb-4 overflow-hidden rounded-3xl border border-cyan-300/25 bg-[radial-gradient(circle_at_top,rgba(34,211,238,0.16),transparent_34%),linear-gradient(135deg,rgba(15,23,42,0.96),rgba(2,6,23,0.94))] p-5 shadow-2xl shadow-cyan-950/30 transition-all duration-700 ${isLoading ? "translate-y-0 opacity-100" : "pointer-events-none -translate-y-2 opacity-0"}`}>
+      <div className="grid items-center gap-5 xl:grid-cols-[auto_1fr]">
+        <div className="flex flex-col items-center text-center">
+          <BExtractorLogo isActive={isLoading} />
+          <p className="mt-3 text-xs font-black uppercase tracking-[0.28em] text-cyan-200">BExtractor Active</p>
+          <div className="mt-2 flex items-center gap-2 text-xs text-slate-400">
+            <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-300 shadow-[0_0_12px_rgba(110,231,183,0.9)]" />
+            <span className="line-clamp-1">{activeLog}</span>
+          </div>
+        </div>
+        <LogsPanel logs={logs} isLoading={isLoading} compact />
+      </div>
+    </section>
+  );
+}
+
+function LogsPanel({ logs, isLoading, compact = false }: { logs: RuntimeLog[]; isLoading: boolean; compact?: boolean }) {
   const logsEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -190,18 +232,23 @@ function LogsPanel({ logs, isLoading }: { logs: RuntimeLog[]; isLoading: boolean
   }, [logs]);
 
   return (
-    <section className="rounded-2xl border border-slate-700 bg-slate-950/80 shadow-2xl shadow-black/30">
+    <section className={`rounded-2xl border border-slate-700 bg-slate-950/80 shadow-2xl shadow-black/30 ${compact ? "h-full" : ""}`}>
       <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-800 bg-slate-950/95 px-4 py-3 backdrop-blur">
         <div className="flex items-center gap-2 text-sm font-semibold text-slate-100"><TerminalSquare className="h-4 w-4 text-cyan-300" /> Runtime Extraction Logs</div>
-        <span className="rounded-full bg-emerald-400/10 px-2 py-1 text-[10px] font-bold uppercase tracking-widest text-emerald-300">{isLoading ? "Live" : "Idle"}</span>
+        <span className={`rounded-full px-2 py-1 text-[10px] font-bold uppercase tracking-widest ${isLoading ? "bg-emerald-400/10 text-emerald-300" : "bg-slate-800 text-slate-400"}`}>{isLoading ? "Live" : "Idle"}</span>
       </div>
-      <div className="max-h-64 space-y-2 overflow-y-auto p-4 font-mono text-xs">
-        {logs.map((log, index) => (
-          <div key={`${log.time}-${index}-${log.text}`} className="grid grid-cols-[64px_1fr] gap-3 rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2">
-            <span className="text-slate-500">{log.time}</span>
-            <span className={log.tone === "success" ? "text-emerald-300" : log.tone === "warn" ? "text-amber-300" : log.tone === "error" ? "text-red-300" : "text-cyan-100"}>{log.text}</span>
-          </div>
-        ))}
+      <div className={`${compact ? "max-h-72" : "max-h-64"} space-y-2 overflow-y-auto p-4 font-mono text-xs`}>
+        {logs.map((log, index) => {
+          const isActive = isLoading && index === logs.length - 1;
+
+          return (
+            <div key={`${log.time}-${index}-${log.text}`} className={`grid grid-cols-[64px_12px_1fr] gap-3 rounded-lg border px-3 py-2 transition ${isActive ? "border-cyan-300/40 bg-cyan-300/10 shadow-[0_0_18px_rgba(34,211,238,0.12)]" : "border-slate-800 bg-slate-900/70 opacity-75"}`}>
+              <span className="text-slate-500">{log.time}</span>
+              <span className={`mt-1.5 h-2 w-2 rounded-full ${isActive ? "animate-pulse bg-emerald-300 shadow-[0_0_10px_rgba(110,231,183,0.9)]" : "bg-slate-700"}`} />
+              <span className={log.tone === "success" ? "text-emerald-300" : log.tone === "warn" ? "text-amber-300" : log.tone === "error" ? "text-red-300" : "text-cyan-100"}>{log.text}</span>
+            </div>
+          );
+        })}
         <div ref={logsEndRef} />
       </div>
     </section>
@@ -313,6 +360,7 @@ export default function Home() {
       const results = mapFinalPayloadToResults(data);
       if (results.length > 0) setExtractionResults(results);
       appendLog("success", "Extraction stream completed and field cards were updated.");
+      setIsLoading(false);
     }
   };
 
@@ -327,6 +375,7 @@ export default function Home() {
     if (!dataText) return dataText;
     if (dataText === "[DONE]") {
       appendLog("success", "Extraction stream completed.");
+      setIsLoading(false);
       return dataText;
     }
 
@@ -399,10 +448,11 @@ export default function Home() {
               <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.28em] text-cyan-300"><CircleDollarSign className="h-4 w-4" /> BExtractor</p>
               <h1 className="mt-2 text-2xl font-black tracking-tight text-white">Template Configurator</h1>
             </div>
-            <div className="flex gap-2"><button onClick={handleRunExtraction} disabled={isLoading} className="inline-flex items-center gap-2 rounded-xl bg-emerald-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-emerald-200 disabled:cursor-not-allowed disabled:opacity-60"><Play className="h-4 w-4" /> {isLoading ? "Loading..." : "Run Extraction"}</button><button onClick={addField} className="inline-flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-cyan-200"><Plus className="h-4 w-4" /> Add Field</button></div>
+            <div className="flex gap-2"><button onClick={handleRunExtraction} disabled={isLoading} className="inline-flex items-center gap-2 rounded-xl bg-emerald-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-emerald-200 disabled:cursor-not-allowed disabled:opacity-60"><Search className={`h-4 w-4 ${isLoading ? "animate-pulse" : ""}`} /> {isLoading ? "Extracting..." : "Run Extraction"}</button><button onClick={addField} className="inline-flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-cyan-200"><Plus className="h-4 w-4" /> Add Field</button></div>
           </header>
           <UploadDropzone file={file} onFileChange={setFile} />
-          <div className="mt-4 grid gap-4 2xl:grid-cols-2">
+          <ExtractionLoadingPanel logs={runtimeLogs} isLoading={isLoading} />
+          <div className={`mt-4 grid gap-4 transition-all duration-700 2xl:grid-cols-2 ${isLoading ? "translate-y-2 opacity-30" : "translate-y-0 opacity-100"}`}>
             {fields.map((field) => <FieldCardEditor key={field.id} field={field} result={extractionResults.find((result) => result.fieldId === String(field.id) || result.field === field.name)} onChange={updateField} onRemove={() => setFields((current) => current.filter((item) => item.id !== field.id))} />)}
           </div>
           <PdfPreview file={file} />
@@ -427,7 +477,7 @@ export default function Home() {
             <div><p className="text-sm font-semibold text-slate-100">Runtime Extraction Logs & Results</p><p className="text-xs text-slate-500">Validation agent monitoring financial extraction output.</p></div>
           </div>
           <LogsPanel logs={runtimeLogs} isLoading={isLoading} />
-          <ResultsPanel results={extractionResults} />
+          <div className={`transition-all duration-700 ${isLoading ? "translate-y-2 opacity-0" : "translate-y-0 opacity-100"}`}><ResultsPanel results={extractionResults} /></div>
           <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-950/80 p-4 text-xs text-slate-400">
             <ClipboardList className="mb-2 h-4 w-4 text-cyan-300" /> Audit trail sealed with immutable run metadata. Source citations remain attached to every field-level decision.
           </div>
