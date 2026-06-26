@@ -390,8 +390,8 @@ function ExtractionLoadingPanel({
             <X className="h-4 w-4" /> Cancel
           </button>
         </div>
-        <div className="grid items-center gap-5 xl:grid-cols-[auto_1fr]">
-          <div className="flex flex-col items-center text-center">
+        <div className="grid min-w-0 items-center gap-5 xl:grid-cols-[auto_minmax(0,1fr)]">
+          <div className="flex min-w-0 flex-col items-center text-center">
             <BExtractorLogo isActive={isLoading} />
             <p className="mt-3 text-xs font-black uppercase tracking-[0.28em] text-cyan-200">
               BExtractor Active
@@ -432,7 +432,7 @@ function LogsPanel({
 
   return (
     <section
-      className={`rounded-2xl border border-slate-700 bg-slate-950/80 shadow-2xl shadow-black/30 ${compact ? "h-full" : ""}`}
+      className={`min-w-0 flex flex-col rounded-2xl border border-slate-700 bg-slate-950/80 shadow-2xl shadow-black/30 ${compact ? "h-[22rem] w-full" : "h-80 w-full"}`}
     >
       <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-800 bg-slate-950/95 px-4 py-3 backdrop-blur">
         <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
@@ -445,7 +445,7 @@ function LogsPanel({
         </span>
       </div>
       <div
-        className={`${compact ? "max-h-72" : "max-h-64"} space-y-2 overflow-y-auto p-4 font-mono text-xs`}
+        className="min-h-0 flex-1 space-y-2 overflow-y-auto p-4 font-mono text-xs"
       >
         {logs.map((log, index) => {
           const isActive = isLoading && index === logs.length - 1;
@@ -453,14 +453,14 @@ function LogsPanel({
           return (
             <div
               key={`${log.time}-${index}-${log.text}`}
-              className={`grid grid-cols-[64px_12px_1fr] gap-3 rounded-lg border px-3 py-2 transition ${isActive ? "border-cyan-300/40 bg-cyan-300/10 shadow-[0_0_18px_rgba(34,211,238,0.12)]" : "border-slate-800 bg-slate-900/70 opacity-75"}`}
+              className={`grid min-w-0 grid-cols-[64px_12px_minmax(0,1fr)] gap-3 rounded-lg border px-3 py-2 transition ${isActive ? "border-cyan-300/40 bg-cyan-300/10 shadow-[0_0_18px_rgba(34,211,238,0.12)]" : "border-slate-800 bg-slate-900/70 opacity-75"}`}
             >
               <span className="text-slate-500">{log.time}</span>
               <span
                 className={`mt-1.5 h-2 w-2 rounded-full ${isActive ? "animate-pulse bg-emerald-300 shadow-[0_0_10px_rgba(110,231,183,0.9)]" : "bg-slate-700"}`}
               />
               <span
-                className={
+                className={`${
                   log.tone === "success"
                     ? "text-emerald-300"
                     : log.tone === "warn"
@@ -468,7 +468,7 @@ function LogsPanel({
                       : log.tone === "error"
                         ? "text-red-300"
                         : "text-cyan-100"
-                }
+                } min-w-0 break-words`}
               >
                 {log.text}
               </span>
