@@ -5,6 +5,7 @@ import io
 import json
 import os
 import sys
+import traceback
 from contextlib import redirect_stderr, redirect_stdout
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -184,11 +185,20 @@ def _format_backend_log_export(
     runtime_log_lines: list[str],
     token_cost_metrics: dict[str, Any] | None,
     node_audit_summary: list[dict[str, Any]],
+    error_details: str | None = None,
 ) -> str:
     """Build a plain-text troubleshooting log that mirrors backend terminal diagnostics."""
 
     sections = ["BEXTRACT BACKEND TROUBLESHOOTING LOG", "", "Runtime events:"]
     sections.extend(runtime_log_lines or ["No runtime events were captured."])
+
+    if error_details:
+        sections.extend([
+            "",
+            "=== EXTRACTION ERROR DETAILS ===",
+            error_details.strip(),
+            "================================",
+        ])
 
     if token_cost_metrics:
         input_tokens = int(token_cost_metrics.get("input_tokens", 0) or 0)
@@ -338,12 +348,19 @@ async def _extract_stream(upload: UploadFile, template_payload: dict[str, Any]) 
             yield _sse("log", {"tone": "success", "status": "Database insert confirmation returned", "message": "Database insert confirmation returned to client."})
             yield _sse("done", {"ok": True, "status": "done"})
     except Exception as exc:
-        captured_backend_logs = captured_backend_log_text()
-        if captured_backend_logs:
-            yield _sse("debug_log", {"message": captured_backend_logs})
         error_message = f"Extraction failed: {exc}"
+        error_details = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        remember_log(error_message)
+        remember_log(error_details.rstrip())
+        print("=== BEXTRACT EXTRACTION ERROR ===", file=sys.stderr)
+        print(error_details, file=sys.stderr, end="")
+        captured_backend_logs = captured_backend_log_text()
+        backend_log_text = _format_backend_log_export(backend_log_lines, None, [], error_details)
+        if captured_backend_logs:
+            backend_log_text = f"{captured_backend_logs}\n\n{backend_log_text}"
+        yield _sse("debug_log", {"message": backend_log_text})
         yield _sse("log", {"tone": "error", "status": "Extraction failed", "message": error_message})
-        yield _sse_data({"error": error_message})
+        yield _sse_data({"error": error_message, "backend_log_text": backend_log_text})
     finally:
         await upload.close()
 

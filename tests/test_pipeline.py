@@ -199,3 +199,48 @@ def test_collect_item_parses_and_removes_raw_agent_output_from_state():
     assert ctx.state["extraction_results"]["assets"]["value"] == 123
     assert "extract_assets_output" not in ctx.state
     assert "current_item" not in ctx.state
+
+
+def test_route_critic_result_commits_when_failed_item_id_is_unknown(capsys):
+    ctx = DummyContext(
+        {
+            "template_payload": {"items": [{"id": "assets", "name": "Assets"}]},
+            "critic_output": json.dumps(
+                {
+                    "status": "fail",
+                    "failed_item_id": "missing_item",
+                    "critique": "Could not validate this field.",
+                }
+            ),
+            "extractor_critiques": {},
+        }
+    )
+
+    event = route_critic_result(ctx)
+
+    assert event.actions.route == "db_commit"
+    assert ctx.state["critic_result"]["status"] == "pass"
+    assert "route_warning" in ctx.state["critic_result"]
+    assert ctx.state["extractor_critiques"] == {}
+    assert "missing_item" in capsys.readouterr().out
+
+
+def test_route_critic_result_retries_known_failed_item_id():
+    ctx = DummyContext(
+        {
+            "template_payload": {"items": [{"id": "assets", "name": "Assets"}]},
+            "critic_output": json.dumps(
+                {
+                    "status": "fail",
+                    "failed_item_id": "assets",
+                    "critique": "Use the balance sheet value.",
+                }
+            ),
+            "extractor_critiques": {},
+        }
+    )
+
+    event = route_critic_result(ctx)
+
+    assert event.actions.route == "retry_assets"
+    assert ctx.state["extractor_critiques"] == {"assets": "Use the balance sheet value."}
