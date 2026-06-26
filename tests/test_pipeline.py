@@ -36,3 +36,29 @@ def test_route_critic_result_does_not_raise_on_empty_output():
 
     assert ctx.state["critic_result"]["status"] == "pass"
     assert event.actions.route == "db_commit"
+
+
+def test_normalize_workflow_results_matches_keys_case_space_and_underscore_insensitive():
+    from server.pipeline import normalize_workflow_results
+
+    template = {"items": [{"id": "rating_action", "name": "Rating Action", "dataType": "String"}]}
+    workflow_output = {
+        "state": {
+            "compiled_payload": {
+                "results": {
+                    "Rating action": {
+                        "Item ID": "Rating Action",
+                        "Field Name": "Rating Action",
+                        "Value": "Affirmed",
+                        "Confidence": 0.93,
+                        "Evidence": "Example evidence",
+                    }
+                }
+            }
+        }
+    }
+
+    normalized = normalize_workflow_results(template, workflow_output)
+
+    assert normalized["rating_action"]["value"] == "Affirmed"
+    assert normalized["rating_action"]["confidence"] == 0.93

@@ -68,6 +68,88 @@ critic_agent = LlmAgent(
 )
 
 
+
+def _normalize_match_key(value: Any) -> str:
+    """Return a casing/spacing-insensitive key for matching template and LLM fields."""
+
+    return re.sub(r"[\s_]+", "", str(value or "").strip().lower())
+
+
+def _case_insensitive_get(payload: dict[str, Any], *keys: str, default: Any = None) -> Any:
+    """Fetch a value from a dict while ignoring key case, spaces, and underscores."""
+
+    normalized = {_normalize_match_key(key): value for key, value in payload.items()}
+    for key in keys:
+        match = _normalize_match_key(key)
+        if match in normalized:
+            return normalized[match]
+    return default
+
+
+def _parse_result_payload(raw: Any) -> Any:
+    """Parse extractor outputs that may be dicts, ADK part payloads, or JSON strings."""
+
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        candidate = _extract_json_candidate(raw)
+        if candidate:
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                return raw
+    if hasattr(raw, "parts"):
+        text = "".join(getattr(part, "text", "") or "" for part in raw.parts)
+        return _parse_result_payload(text)
+    return raw
+
+
+def normalize_workflow_results(template_payload: dict[str, Any], workflow_output: Any) -> dict[str, Any]:
+    """Map ADK/Gemini output onto template item cards with tolerant key matching."""
+
+    output = workflow_output if isinstance(workflow_output, dict) else {}
+    state = output.get("state", {}) if isinstance(output.get("state"), dict) else {}
+    compiled = state.get("compiled_payload", {}) if isinstance(state.get("compiled_payload"), dict) else {}
+    raw_results = compiled.get("results") if isinstance(compiled.get("results"), dict) else state.get("extraction_results", {})
+    raw_results = raw_results if isinstance(raw_results, dict) else {}
+
+    normalized_results: dict[str, Any] = {}
+    for raw_key, raw_value in raw_results.items():
+        parsed = _parse_result_payload(raw_value)
+        normalized_results[_normalize_match_key(raw_key)] = parsed
+        if isinstance(parsed, dict):
+            for candidate_key in ("item_id", "item id", "field_name", "field name", "table_name", "table name", "name", "key", "id"):
+                candidate_value = _case_insensitive_get(parsed, candidate_key)
+                if candidate_value:
+                    normalized_results[_normalize_match_key(candidate_value)] = parsed
+
+    mapped: dict[str, Any] = {}
+    for index, item in enumerate(_template_items(template_payload), start=1):
+        item_id = _item_id(item, index)
+        lookup_keys = [item_id, item.get("key"), item.get("name"), item.get("label"), item.get("field_name")]
+        result = None
+        for lookup_key in lookup_keys:
+            normalized_lookup = _normalize_match_key(lookup_key)
+            if normalized_lookup and normalized_lookup in normalized_results:
+                result = normalized_results[normalized_lookup]
+                break
+
+        if isinstance(result, dict):
+            item_name = str(item.get("name") or item.get("label") or item_id)
+            mapped[item_id] = {
+                "item_id": str(_case_insensitive_get(result, "item_id", "item id", default=item_id)),
+                "field_name": str(_case_insensitive_get(result, "field_name", "field name", "table_name", "table name", default=item_name)),
+                "value": _case_insensitive_get(result, "value", "rows", "data", "answer", default="Pending ADK extraction result"),
+                "unit": _case_insensitive_get(result, "unit", "data_type", "data type", default=item.get("dataType", "String")),
+                "confidence": _case_insensitive_get(result, "confidence", "score", default=0.0),
+                "evidence": _case_insensitive_get(result, "evidence", "source", "citation", default=""),
+                "critique_response": _case_insensitive_get(result, "critique_response", "critique response", default=""),
+            }
+        elif result is not None:
+            mapped[item_id] = result
+
+    return mapped
+
 def _template_items(template_payload: dict[str, Any]) -> list[dict[str, Any]]:
     """Normalize supported UI template shapes into a flat item list."""
 
@@ -301,6 +383,10 @@ async def db_commit_node(ctx) -> dict[str, Any]:
     payload = ctx.state.get("compiled_payload", {})
     if isinstance(ctx.state.get("critic_result"), dict) and ctx.state["critic_result"].get("corrected_payload"):
         payload = ctx.state["critic_result"]["corrected_payload"]
+
+    print("=== DEBUG DATABASE PAYLOAD ===")
+    print(f"Payload keys: {list(payload.keys()) if isinstance(payload, dict) else 'Not a dict'}")
+    print(f"Payload content: {repr(payload)}")
 
     template = payload.get("template", {}) if isinstance(payload, dict) else {}
     template_id = str(template.get("id") or template.get("template_id") or "") if isinstance(template, dict) else ""

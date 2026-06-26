@@ -15,7 +15,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from server.ingestion import ingest_document
-from server.pipeline import build_dynamic_graph, db_commit_node, workflow_progress
+from server.pipeline import build_dynamic_graph, db_commit_node, normalize_workflow_results, workflow_progress
 
 REQUIRED_ENV_VARS = ("GOOGLE_API_KEY", "DATABASE_URL", "DIRECT_URL")
 missing_env_vars = [name for name in REQUIRED_ENV_VARS if not os.getenv(name)]
@@ -110,7 +110,11 @@ async def _run_adk_workflow(graph: Any, payload: dict[str, Any]) -> Any:
         if session is not None and getattr(session, "state", None) is not None:
             session_state = session.state
             state = session_state.to_dict() if hasattr(session_state, "to_dict") else dict(session_state)
-        return {"events": events, "state": state}
+        response = {"events": events, "state": state}
+        print("=== DEBUG FINAL WORKFLOW OUTPUT ===")
+        print(f"Type of output: {type(response)}")
+        print(f"Content of output: {repr(response)}")
+        return response
     except Exception as exc:
         raise RuntimeError(f"Gemini workflow execution failed: {exc}") from exc
 
@@ -160,6 +164,9 @@ async def _extract_stream(upload: UploadFile, template_payload: dict[str, Any]) 
 
         yield _sse("log", {"tone": "info", "status": "Executing ADK workflow graph", "message": "Executing ADK workflow graph and critic validation."})
         workflow_output = await _run_adk_workflow(graph, {"template_payload": template_payload})
+        normalized_results = normalize_workflow_results(template_payload, workflow_output)
+        if normalized_results:
+            extraction_results.update(normalized_results)
         yield _sse("log", {"tone": "success", "status": "Committing structured extraction payload", "message": "ADK workflow completed; committing structured extraction payload."})
 
         compiled_payload = {
