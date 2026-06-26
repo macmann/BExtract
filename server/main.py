@@ -10,6 +10,9 @@ from typing import Any
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai import types
 
 from server.ingestion import ingest_document
 from server.pipeline import build_dynamic_graph, db_commit_node, workflow_progress
@@ -66,57 +69,48 @@ def _template_items(template_payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 async def _run_adk_workflow(graph: Any, payload: dict[str, Any]) -> Any:
-    """Run the ADK workflow using the ADK 2.x keyword-only node API.
+    """Run the ADK workflow through Runner so ADK initializes invocation internals."""
 
-    ``Workflow`` inherits from ``BaseNode`` and its ``run`` method is declared as
-    ``run(*, ctx, node_input)``. Passing the template payload positionally raises
-    ``BaseNode.run() takes 1 positional argument but 2 were given``, so this
-    helper builds a minimal invocation context and consumes the async event
-    stream returned by the graph. Older runner-style APIs are still supported as
-    a fallback.
-    """
+    app_name = "bextract"
+    user_id = "api"
+    session_id = f"bextract-{id(graph)}"
+    session_service = InMemorySessionService()
+    await session_service.create_session(
+        app_name=app_name,
+        user_id=user_id,
+        session_id=session_id,
+        state={},
+    )
+    runner = Runner(
+        app_name=app_name,
+        node=graph,
+        session_service=session_service,
+    )
+    new_message = types.Content(
+        role="user",
+        parts=[types.Part(text=json.dumps(payload, default=str))],
+    )
 
     try:
-        run_method = getattr(graph, "run", None)
-        if run_method is not None:
-            from google.adk.agents.context import Context
-            from google.adk.agents.invocation_context import InvocationContext
-            from google.adk.sessions import InMemorySessionService
+        events = []
+        async for event in runner.run_async(
+            user_id=user_id,
+            session_id=session_id,
+            new_message=new_message,
+            state_delta=payload,
+        ):
+            events.append(event.model_dump(mode="json") if hasattr(event, "model_dump") else event)
 
-            session_service = InMemorySessionService()
-            session = session_service.create_session_sync(
-                app_name="bextract",
-                user_id="api",
-                state={},
-                session_id=f"bextract-{id(graph)}",
-            )
-            invocation_context = InvocationContext(
-                session_service=session_service,
-                invocation_id=f"bextract-{id(payload)}",
-                agent=graph,
-                session=session,
-            )
-            ctx = Context(invocation_context, node=graph, run_id=invocation_context.invocation_id)
-            events = []
-            async for event in run_method(ctx=ctx, node_input=payload):
-                events.append(event.model_dump(mode="json") if hasattr(event, "model_dump") else event)
-            state = ctx.state.to_dict() if hasattr(ctx.state, "to_dict") else dict(ctx.state)
-            return {"events": events, "state": state}
-
-        for method_name in ("run_async", "arun", "execute_async"):
-            method = getattr(graph, method_name, None)
-            if method is not None:
-                return await method(payload)
-
-        for method_name in ("execute",):
-            method = getattr(graph, method_name, None)
-            if method is not None:
-                result = method(payload)
-                if hasattr(result, "__await__"):
-                    return await result
-                return result
-
-        return {"status": "graph_built", "graph": getattr(graph, "name", str(graph))}
+        session = await session_service.get_session(
+            app_name=app_name,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        state = {}
+        if session is not None and getattr(session, "state", None) is not None:
+            session_state = session.state
+            state = session_state.to_dict() if hasattr(session_state, "to_dict") else dict(session_state)
+        return {"events": events, "state": state}
     except Exception as exc:
         raise RuntimeError(f"Gemini workflow execution failed: {exc}") from exc
 
