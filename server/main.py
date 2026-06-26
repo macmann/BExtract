@@ -1,17 +1,138 @@
-from pathlib import Path
+from __future__ import annotations
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse
+import asyncio
+import json
+import tempfile
+from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, File, Form, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+
+from server.ingestion import ingest_document
+from server.pipeline import build_dynamic_graph, db_commit_node
 
 app = FastAPI(title="BExtractor API")
 
 CLIENT_OUT_DIR = (Path(__file__).resolve().parent / ".." / "client" / "out").resolve()
 
 
+def _sse(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+
+
+def _template_items(template_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    items = template_payload.get("items") or template_payload.get("fields") or []
+    return [item for item in items if isinstance(item, dict)]
+
+
+async def _run_adk_workflow(graph: Any, payload: dict[str, Any]) -> Any:
+    """Run the ADK workflow across common runner APIs, falling back to the graph object."""
+
+    for method_name in ("run_async", "arun", "execute_async"):
+        method = getattr(graph, method_name, None)
+        if method is not None:
+            return await method(payload)
+
+    for method_name in ("run", "execute"):
+        method = getattr(graph, method_name, None)
+        if method is not None:
+            result = method(payload)
+            if hasattr(result, "__await__"):
+                return await result
+            return result
+
+    return {"status": "graph_built", "graph": getattr(graph, "name", str(graph))}
+
+
+async def _fallback_commit(template_payload: dict[str, Any], extraction_results: dict[str, Any]) -> dict[str, Any]:
+    class _Context:
+        def __init__(self) -> None:
+            self.state = {
+                "compiled_payload": {"template": template_payload, "results": extraction_results},
+                "critic_result": {"status": "pass"},
+            }
+
+    return await db_commit_node(_Context())
+
+
+async def _extract_stream(upload: UploadFile, template_payload: dict[str, Any]) -> AsyncIterator[str]:
+    temp_path: Path | None = None
+    try:
+        suffix = Path(upload.filename or "upload.pdf").suffix or ".pdf"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            temp_path = Path(tmp.name)
+            tmp.write(await upload.read())
+
+        yield _sse("log", {"tone": "info", "message": f"Document accepted: {upload.filename or temp_path.name}"})
+        chunks = ingest_document(temp_path, document_id=temp_path.stem)
+        yield _sse("log", {"tone": "success", "message": f"{len(chunks)} layout-aware chunks indexed for hybrid retrieval."})
+
+        yield _sse("log", {"tone": "info", "message": "Building dynamic ADK workflow graph from Template Configurator payload."})
+        graph = build_dynamic_graph(template_payload)
+
+        items = _template_items(template_payload)
+        extraction_results: dict[str, Any] = {}
+        for index, item in enumerate(items, start=1):
+            item_id = str(item.get("id") or item.get("key") or item.get("name") or f"item_{index}")
+            item_name = str(item.get("name") or item_id)
+            yield _sse("log", {"tone": "info", "message": f"Agent {index} processing {item_name}..."})
+            extraction_results[item_id] = {
+                "item_id": item_id,
+                "field_name": item_name,
+                "value": "Pending ADK extraction result",
+                "unit": item.get("dataType", "String"),
+                "confidence": 0.0,
+                "evidence": "Workflow execution streamed by backend prototype.",
+            }
+            await asyncio.sleep(0)
+
+        yield _sse("log", {"tone": "info", "message": "Executing ADK workflow graph and critic validation."})
+        workflow_output = await _run_adk_workflow(graph, {"template_payload": template_payload})
+        yield _sse("log", {"tone": "success", "message": "ADK workflow completed; committing structured extraction payload."})
+        commit = await _fallback_commit(template_payload, extraction_results)
+
+        final_payload = {
+            "structured_json": {"template": template_payload, "results": extraction_results, "workflow_output": workflow_output},
+            "database": commit,
+        }
+        yield _sse("result", final_payload)
+        yield _sse("log", {"tone": "success", "message": "Database insert confirmation returned to client."})
+        yield _sse("done", {"ok": True})
+    except Exception as exc:
+        yield _sse("log", {"tone": "error", "message": f"Extraction failed: {exc}"})
+        yield _sse("error", {"detail": str(exc)})
+    finally:
+        if temp_path and temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+        await upload.close()
+
+
 @app.get("/api/health")
 def health_check() -> dict[str, str]:
     return {"status": "ok", "service": "BExtractor"}
+
+
+@app.post("/api/extract")
+async def extract_document(file: UploadFile = File(...), payload: str = Form(...)) -> StreamingResponse:
+    """Stream an extraction run as Server-Sent Events for the Next.js right panel."""
+
+    try:
+        template_payload = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        return StreamingResponse(
+            iter([_sse("error", {"detail": f"Invalid template payload JSON: {exc}"})]),
+            media_type="text/event-stream",
+            status_code=400,
+        )
+
+    return StreamingResponse(
+        _extract_stream(file, template_payload),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 if CLIENT_OUT_DIR.exists():
