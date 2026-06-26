@@ -341,7 +341,7 @@ function CostMetricsModal({ metrics, onClose }: { metrics: TokenCostMetrics; onC
   );
 }
 
-function ResultsPanel({ results, tokenCostMetrics, onViewCostMetrics, onDownload, onSendToMcp }: { results: ExtractionResult[]; tokenCostMetrics: TokenCostMetrics | null; onViewCostMetrics: () => void; onDownload: (format: "csv" | "json") => void; onSendToMcp: () => void }) {
+function ResultsPanel({ results, tokenCostMetrics, hasBackendLogs, onViewCostMetrics, onDownload, onDownloadLogs, onSendToMcp }: { results: ExtractionResult[]; tokenCostMetrics: TokenCostMetrics | null; hasBackendLogs: boolean; onViewCostMetrics: () => void; onDownload: (format: "csv" | "json") => void; onDownloadLogs: () => void; onSendToMcp: () => void }) {
   return (
     <section className="mt-4 rounded-2xl border border-slate-700 bg-slate-900/80 p-4">
       <div className="mb-3 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
@@ -351,6 +351,7 @@ function ResultsPanel({ results, tokenCostMetrics, onViewCostMetrics, onDownload
         </div>
         <div className="flex flex-wrap gap-2">
           <button onClick={onViewCostMetrics} disabled={!tokenCostMetrics} className="inline-flex items-center gap-2 rounded-lg border border-emerald-300/30 bg-emerald-300/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.16em] text-emerald-100 hover:border-emerald-200 disabled:cursor-not-allowed disabled:opacity-40" title={tokenCostMetrics ? "View token and cost metrics for this extraction" : "Run an extraction to view token and cost metrics"}><CircleDollarSign className="h-4 w-4" /> Cost</button>
+          <button onClick={onDownloadLogs} disabled={!hasBackendLogs} className="inline-flex items-center gap-2 rounded-lg border border-purple-300/30 bg-purple-300/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.16em] text-purple-100 hover:border-purple-200 disabled:cursor-not-allowed disabled:opacity-40" title={hasBackendLogs ? "Export backend runtime, cost, and audit logs as text" : "Run an extraction to export backend logs"}><Download className="h-4 w-4" /> Logs TXT</button>
           <button onClick={() => onDownload("csv")} disabled={results.length === 0} className="inline-flex items-center gap-2 rounded-lg border border-cyan-300/30 bg-cyan-300/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.16em] text-cyan-100 hover:border-cyan-200 disabled:cursor-not-allowed disabled:opacity-40"><Download className="h-4 w-4" /> CSV</button>
           <button onClick={() => onDownload("json")} disabled={results.length === 0} className="inline-flex items-center gap-2 rounded-lg border border-cyan-300/30 bg-cyan-300/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.16em] text-cyan-100 hover:border-cyan-200 disabled:cursor-not-allowed disabled:opacity-40"><FileJson className="h-4 w-4" /> JSON</button>
           <button onClick={onSendToMcp} className="inline-flex items-center gap-2 rounded-lg border border-amber-300/30 bg-amber-300/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.16em] text-amber-100 hover:border-amber-200"><DatabaseZap className="h-4 w-4" /> MCP</button>
@@ -392,6 +393,7 @@ export default function Home() {
   const [showDebugPanel, setShowDebugPanel] = useState(false);
   const [templateName, setTemplateName] = useState("BExtractor Template");
   const [tokenCostMetrics, setTokenCostMetrics] = useState<TokenCostMetrics | null>(null);
+  const [backendLogText, setBackendLogText] = useState("");
   const [isCostMetricsOpen, setIsCostMetricsOpen] = useState(false);
   const addField = () => setFields((current) => [...current, { id: Date.now(), name: "", definition: "", routeType: "Scalar", dataType: "String" }]);
   const updateField = (updated: FieldCard) => setFields((current) => current.map((field) => (field.id === updated.id ? updated : field)));
@@ -459,6 +461,7 @@ export default function Home() {
       if (results.length > 0) setExtractionResults(results);
       const metrics = normalizeTokenCostMetrics(data.token_cost_metrics);
       if (metrics) setTokenCostMetrics(metrics);
+      if (typeof data.backend_log_text === "string") setBackendLogText(data.backend_log_text);
       appendLog("success", "Extraction stream completed and field cards were updated.");
       setIsLoading(false);
     }
@@ -523,6 +526,23 @@ export default function Home() {
     appendLog("success", `Downloaded ${payload.templateName} output as ${format.toUpperCase()}.`);
   };
 
+  const handleDownloadLogs = () => {
+    if (!backendLogText) {
+      appendLog("warn", "Run an extraction before exporting backend logs.");
+      return;
+    }
+
+    const slug = safeTemplateName().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "bextract-output";
+    const blob = new Blob([backendLogText], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${slug}-backend-logs.txt`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    appendLog("success", "Downloaded backend runtime, cost, and audit logs as TXT.");
+  };
+
   const handleSendToMcp = () => {
     appendLog("info", "MCP database delivery is a placeholder. Connector configuration will be added in a future release.");
   };
@@ -539,6 +559,7 @@ export default function Home() {
     setRuntimeLogs([]);
     setExtractionResults([]);
     setTokenCostMetrics(null);
+    setBackendLogText("");
     setIsCostMetricsOpen(false);
 
     const fieldPayload = fields.map((field) => ({
@@ -611,7 +632,7 @@ export default function Home() {
           </div>
           {!showDebugPanel && (
             <div className={`mx-auto max-w-6xl transition-all duration-700 ${isLoading ? "translate-y-2 opacity-0" : "translate-y-0 opacity-100"}`}>
-              <ResultsPanel results={extractionResults} tokenCostMetrics={tokenCostMetrics} onViewCostMetrics={() => setIsCostMetricsOpen(true)} onDownload={handleDownloadOutput} onSendToMcp={handleSendToMcp} />
+              <ResultsPanel results={extractionResults} tokenCostMetrics={tokenCostMetrics} hasBackendLogs={Boolean(backendLogText)} onViewCostMetrics={() => setIsCostMetricsOpen(true)} onDownload={handleDownloadOutput} onDownloadLogs={handleDownloadLogs} onSendToMcp={handleSendToMcp} />
             </div>
           )}
           <PdfPreview file={file} />
@@ -636,7 +657,7 @@ export default function Home() {
             <div><p className="text-sm font-semibold text-slate-100">Runtime Extraction Logs & Results</p><p className="text-xs text-slate-500">Validation agent monitoring financial extraction output.</p></div>
           </div>
           <LogsPanel logs={runtimeLogs} isLoading={isLoading} />
-          <div className={`transition-all duration-700 ${isLoading ? "translate-y-2 opacity-0" : "translate-y-0 opacity-100"}`}><ResultsPanel results={extractionResults} tokenCostMetrics={tokenCostMetrics} onViewCostMetrics={() => setIsCostMetricsOpen(true)} onDownload={handleDownloadOutput} onSendToMcp={handleSendToMcp} /></div>
+          <div className={`transition-all duration-700 ${isLoading ? "translate-y-2 opacity-0" : "translate-y-0 opacity-100"}`}><ResultsPanel results={extractionResults} tokenCostMetrics={tokenCostMetrics} hasBackendLogs={Boolean(backendLogText)} onViewCostMetrics={() => setIsCostMetricsOpen(true)} onDownload={handleDownloadOutput} onDownloadLogs={handleDownloadLogs} onSendToMcp={handleSendToMcp} /></div>
           <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-950/80 p-4 text-xs text-slate-400">
             <ClipboardList className="mb-2 h-4 w-4 text-cyan-300" /> Audit trail sealed with immutable run metadata. Source citations remain attached to every field-level decision.
           </div>
