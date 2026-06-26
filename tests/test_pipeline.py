@@ -166,7 +166,7 @@ def test_stateless_callback_keeps_only_current_user_turn():
         previous_interaction_id="leaky-provider-history",
     )
 
-    result = _reset_llm_request_to_stateless_turn(None, request)
+    result = _reset_llm_request_to_stateless_turn(callback_context=None, llm_request=request)
 
     assert result is None
     assert request.previous_interaction_id is None
