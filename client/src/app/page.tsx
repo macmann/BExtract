@@ -46,6 +46,8 @@ type ExtractionResult = {
   alert?: string;
 };
 
+type BatchExportRecord = Record<string, string | number | boolean | null>;
+
 type RuntimeLog = {
   time: string;
   tone: "info" | "success" | "warn" | "error";
@@ -705,6 +707,9 @@ export default function Home() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const [extractionResults, setExtractionResults] =
     useState<ExtractionResult[]>(initialResults);
+  const [batchExportRecords, setBatchExportRecords] = useState<
+    BatchExportRecord[]
+  >([]);
   const [isLoading, setIsLoading] = useState(false);
   const [showDebugPanel, setShowDebugPanel] = useState(false);
   const [templateName, setTemplateName] = useState("BExtractor Template");
@@ -882,6 +887,13 @@ export default function Home() {
       normalizedEvent === "result" && batchTotal > 1 && batchCurrent > 0;
 
     if (normalizedEvent === "batch_export") {
+      const records = Array.isArray(data.records)
+        ? (data.records.filter(
+            (record): record is BatchExportRecord =>
+              typeof record === "object" && record !== null && !Array.isArray(record),
+          ) as BatchExportRecord[])
+        : [];
+      if (records.length > 0) setBatchExportRecords(records);
       const metrics = normalizeTokenCostMetrics(data.token_cost_metrics);
       if (metrics) setTokenCostMetrics(metrics);
       appendLog(
@@ -962,19 +974,38 @@ export default function Home() {
       "bextract-output"
     ).trim();
 
-  const serializeResultsForDownload = () => ({
-    templateName: safeTemplateName(),
-    exportedAt: new Date().toISOString(),
-    results: extractionResults.map((result) => ({
-      field: result.field,
-      value: result.value,
-      confidence: result.confidence,
-      status: result.status,
-      alert: result.alert ?? "",
-    })),
-  });
+  const serializeResultsForDownload = () => {
+    const hasBatchRecords = batchExportRecords.length > 0;
+    return {
+      templateName: safeTemplateName(),
+      exportedAt: new Date().toISOString(),
+      isBatchExport: hasBatchRecords,
+      results: hasBatchRecords
+        ? batchExportRecords
+        : extractionResults.map((result) => ({
+            field: result.field,
+            value: result.value,
+            confidence: result.confidence,
+            status: result.status,
+            alert: result.alert ?? "",
+          })),
+    };
+  };
 
   const escapeCsvCell = (value: string) => `"${value.replace(/"/g, '""')}"`;
+
+  const getCsvHeaders = (rows: Record<string, unknown>[]) => {
+    const preferredHeaders = ["File Name", "Extraction Status"];
+    const headers = preferredHeaders.filter((header) =>
+      rows.some((row) => Object.prototype.hasOwnProperty.call(row, header)),
+    );
+    rows.forEach((row) => {
+      Object.keys(row).forEach((key) => {
+        if (!headers.includes(key)) headers.push(key);
+      });
+    });
+    return headers;
+  };
 
   const handleDownloadOutput = (format: "csv" | "json") => {
     const payload = serializeResultsForDownload();
@@ -985,29 +1016,39 @@ export default function Home() {
         .replace(/(^-|-$)/g, "") || "bextract-output";
     const content =
       format === "json"
-        ? JSON.stringify(payload, null, 2)
-        : [
-            [
-              "template_name",
-              "field",
-              "value",
-              "confidence",
-              "status",
-              "alert",
-            ],
-            ...payload.results.map((result) => [
-              payload.templateName,
-              result.field,
-              result.value,
-              result.confidence,
-              result.status,
-              result.alert,
-            ]),
-          ]
-            .map((row) =>
-              row.map((cell) => escapeCsvCell(String(cell))).join(","),
-            )
-            .join("\n");
+        ? JSON.stringify(
+            payload.isBatchExport ? payload.results : payload,
+            null,
+            2,
+          )
+        : (() => {
+            const rows = payload.results as Record<string, unknown>[];
+            const headers = payload.isBatchExport
+              ? getCsvHeaders(rows)
+              : [
+                  "template_name",
+                  "field",
+                  "value",
+                  "confidence",
+                  "status",
+                  "alert",
+                ];
+            const csvRows = payload.isBatchExport
+              ? rows.map((row) => headers.map((header) => row[header] ?? ""))
+              : rows.map((result) => [
+                  payload.templateName,
+                  result.field,
+                  result.value,
+                  result.confidence,
+                  result.status,
+                  result.alert,
+                ]);
+            return [headers, ...csvRows]
+              .map((row) =>
+                row.map((cell) => escapeCsvCell(String(cell))).join(","),
+              )
+              .join("\n");
+          })();
     const blob = new Blob([content], {
       type: format === "json" ? "application/json" : "text/csv",
     });
@@ -1059,6 +1100,7 @@ export default function Home() {
     setFiles(nextFiles);
     setIsLoading(false);
     setExtractionResults([]);
+    setBatchExportRecords([]);
     setTokenCostMetrics(null);
     setBackendLogText("");
     setDebugLogText("");
@@ -1092,6 +1134,7 @@ export default function Home() {
     setRuntimeLogs([]);
     setDebugLogText("");
     setExtractionResults([]);
+    setBatchExportRecords([]);
     setTokenCostMetrics(null);
     setBackendLogText("");
     setIsCostMetricsOpen(false);
