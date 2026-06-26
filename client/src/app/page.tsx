@@ -27,6 +27,7 @@ import {
 
 type RouteType = "Scalar" | "Tabular";
 type DataType = "String" | "Float" | "Date" | "Text Summary";
+type ExtractionApproach = "pre_injected" | "agentic";
 
 type FieldCard = {
   id: number;
@@ -77,6 +78,11 @@ const initialFields: FieldCard[] = [
     routeType: "Tabular",
     dataType: "String",
   },
+];
+
+const extractionApproachOptions: { value: ExtractionApproach; label: string }[] = [
+  { value: "pre_injected", label: "Pre-Injected RAG (Fast/Cheap)" },
+  { value: "agentic", label: "Agentic RAG (Deep Reasoning)" },
 ];
 
 const initialLogs: RuntimeLog[] = [
@@ -755,6 +761,8 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [showDebugPanel, setShowDebugPanel] = useState(false);
   const [templateName, setTemplateName] = useState("BExtractor Template");
+  const [extractionApproach, setExtractionApproach] =
+    useState<ExtractionApproach>("pre_injected");
   const [tokenCostMetrics, setTokenCostMetrics] =
     useState<TokenCostMetrics | null>(null);
   const [backendLogText, setBackendLogText] = useState("");
@@ -1114,10 +1122,16 @@ export default function Home() {
       routeType: field.routeType,
       dataType: field.dataType,
     }));
+    const documentId = file.name.replace(/\.pdf$/i, "") || "uploaded_document";
+    const templatePayload = {
+      documentId,
+      items: fieldPayload,
+      extractionApproach,
+    };
     const formData = new FormData();
     formData.append("file", file, file.name);
     formData.append("fields", JSON.stringify(fieldPayload));
-    formData.append("payload", JSON.stringify({ items: fieldPayload }));
+    formData.append("payload", JSON.stringify(templatePayload));
 
     try {
       appendLog(
@@ -1189,7 +1203,30 @@ export default function Home() {
                 Template Configurator
               </h1>
             </div>
-            <div className="flex flex-wrap justify-end gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <fieldset className="flex rounded-xl border border-slate-700/80 bg-slate-950/70 p-1 shadow-inner shadow-black/20">
+                <legend className="sr-only">Extraction architecture</legend>
+                {extractionApproachOptions.map((option) => (
+                  <label
+                    key={option.value}
+                    className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-black uppercase tracking-[0.14em] transition ${
+                      extractionApproach === option.value
+                        ? "bg-cyan-300 text-slate-950 shadow-lg shadow-cyan-950/30"
+                        : "text-slate-300 hover:bg-slate-800/80 hover:text-cyan-100"
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="extraction-approach"
+                      value={option.value}
+                      checked={extractionApproach === option.value}
+                      onChange={() => setExtractionApproach(option.value)}
+                      className="sr-only"
+                    />
+                    {option.label}
+                  </label>
+                ))}
+              </fieldset>
               <button
                 onClick={handleRunExtraction}
                 disabled={isLoading}
