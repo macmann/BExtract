@@ -101,6 +101,38 @@ function UploadDropzone({ file, onFileChange }: { file: File | null; onFileChang
   );
 }
 
+function PdfPreview({ file }: { file: File | null }) {
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!file) {
+      setPreviewUrl(null);
+      return;
+    }
+
+    const objectUrl = URL.createObjectURL(file);
+    setPreviewUrl(objectUrl);
+
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [file]);
+
+  if (!previewUrl) return null;
+
+  return (
+    <section className="mt-4 rounded-2xl border border-slate-700/80 bg-slate-950/70 p-4 shadow-2xl shadow-black/20">
+      <div className="mb-3 flex items-center justify-between">
+        <h2 className="text-xs font-black uppercase tracking-[0.22em] text-cyan-100">PDF Preview</h2>
+        <span className="max-w-[50%] truncate text-xs text-slate-400">{file?.name}</span>
+      </div>
+      <iframe
+        src={previewUrl}
+        title={`PDF preview for ${file?.name ?? "uploaded document"}`}
+        className="h-[560px] w-full rounded-xl border border-slate-800 bg-slate-900"
+      />
+    </section>
+  );
+}
+
 function FieldCardEditor({ field, result, onChange, onRemove }: { field: FieldCard; result?: ExtractionResult; onChange: (field: FieldCard) => void; onRemove: () => void }) {
   return (
     <article className="rounded-2xl border border-slate-700/80 bg-slate-900/70 p-4 shadow-2xl shadow-black/20">
@@ -269,8 +301,15 @@ export default function Home() {
   };
 
   const handleSseData = (eventName: string | undefined, data: Record<string, unknown>) => {
-    const message = String(data.message ?? data.status ?? data.detail ?? data.log ?? "");
     const normalizedEvent = eventName ?? String(data.event ?? data.type ?? "message");
+    const errorMessage = typeof data.error === "string" ? data.error : "";
+    const message = String(errorMessage || data.message || data.status || data.detail || data.log || "");
+
+    if (errorMessage) {
+      appendLog("error", errorMessage);
+      setIsLoading(false);
+      return;
+    }
 
     if (message) appendLog(coerceTone(data.tone ?? (normalizedEvent === "error" ? "error" : undefined)), message);
 
@@ -304,6 +343,8 @@ export default function Home() {
   };
 
   const handleRunExtraction = async () => {
+    if (isLoading) return;
+
     if (!file) {
       appendLog("warn", "Select a PDF before starting extraction.");
       return;
@@ -362,12 +403,13 @@ export default function Home() {
               <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.28em] text-cyan-300"><CircleDollarSign className="h-4 w-4" /> BExtractor</p>
               <h1 className="mt-2 text-2xl font-black tracking-tight text-white">Template Configurator</h1>
             </div>
-            <div className="flex gap-2"><button onClick={handleRunExtraction} disabled={isLoading} className="inline-flex items-center gap-2 rounded-xl bg-emerald-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-emerald-200 disabled:cursor-not-allowed disabled:opacity-60"><Play className="h-4 w-4" /> {isLoading ? "Running" : "Run Extraction"}</button><button onClick={addField} className="inline-flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-cyan-200"><Plus className="h-4 w-4" /> Add Field</button></div>
+            <div className="flex gap-2"><button onClick={handleRunExtraction} disabled={isLoading} className="inline-flex items-center gap-2 rounded-xl bg-emerald-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-emerald-200 disabled:cursor-not-allowed disabled:opacity-60"><Play className="h-4 w-4" /> {isLoading ? "Loading..." : "Run Extraction"}</button><button onClick={addField} className="inline-flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-cyan-200"><Plus className="h-4 w-4" /> Add Field</button></div>
           </header>
           <UploadDropzone file={file} onFileChange={setFile} />
           <div className="mt-4 grid gap-4 2xl:grid-cols-2">
             {fields.map((field) => <FieldCardEditor key={field.id} field={field} result={extractionResults.find((result) => result.fieldId === String(field.id) || result.field === field.name)} onChange={updateField} onRemove={() => setFields((current) => current.filter((item) => item.id !== field.id))} />)}
           </div>
+          <PdfPreview file={file} />
         </section>
 
         <aside className="w-[40%] bg-[linear-gradient(180deg,#0b1020,#05070d)] p-5">

@@ -138,8 +138,11 @@ def compile_payload(ctx) -> dict[str, Any]:
 def route_critic_result(ctx) -> Event:
     raw = ctx.state.get("critic_output") or ctx.state.get("critic_result") or {}
     parsed = raw
-    if isinstance(raw, str):
-        parsed = json.loads(raw)
+    try:
+        if isinstance(raw, str):
+            parsed = json.loads(raw)
+    except Exception as exc:
+        raise RuntimeError(f"Gemini critic response parsing failed: {exc}") from exc
     ctx.state["critic_result"] = parsed
     route = "db_commit"
     if isinstance(parsed, dict) and parsed.get("status") == "fail":
@@ -157,24 +160,32 @@ async def save_extraction_results(template_id: str, results: dict[str, Any]) -> 
     if importlib.util.find_spec("prisma") is None:
         return {"status": "ready", "backend": "memory", "payload": results}
 
-    prisma_module = importlib.import_module("prisma")
-    client = prisma_module.Prisma()
-    await client.connect()
     try:
-        record = await client.extractionresult.create(
-            data={
-                "documentId": str(results.get("document_id") or results.get("documentId") or template_id or "uploaded_document"),
-                "fileName": str(results.get("file_name") or results.get("fileName") or "uploaded.pdf"),
-                "rawText": results.get("raw_text") or results.get("rawText"),
-                "data": results,
-                "confidence": results.get("confidence") if isinstance(results.get("confidence"), (int, float)) else None,
-                "status": str(results.get("status") or "validated"),
-                "templateId": template_id or None,
-            }
-        )
-        return {"status": "committed", "backend": "prisma", "record_id": getattr(record, "id", None)}
-    finally:
-        await client.disconnect()
+        prisma_module = importlib.import_module("prisma")
+        client = prisma_module.Prisma()
+        await client.connect()
+        try:
+            record = await client.extractionresult.create(
+                data={
+                    "documentId": str(
+                        results.get("document_id")
+                        or results.get("documentId")
+                        or template_id
+                        or "uploaded_document"
+                    ),
+                    "fileName": str(results.get("file_name") or results.get("fileName") or "uploaded.pdf"),
+                    "rawText": results.get("raw_text") or results.get("rawText"),
+                    "data": results,
+                    "confidence": results.get("confidence") if isinstance(results.get("confidence"), (int, float)) else None,
+                    "status": str(results.get("status") or "validated"),
+                    "templateId": template_id or None,
+                }
+            )
+            return {"status": "committed", "backend": "prisma", "record_id": getattr(record, "id", None)}
+        finally:
+            await client.disconnect()
+    except Exception as exc:
+        raise RuntimeError(f"Prisma database insertion failed: {exc}") from exc
 
 
 async def db_commit_node(ctx) -> dict[str, Any]:
