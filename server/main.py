@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import io
 import json
 import os
 import sys
 import traceback
+import uuid
 from contextlib import redirect_stderr, redirect_stdout
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, List
 
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -24,8 +26,10 @@ from server.custom_tools import reset_current_document_id, set_current_document_
 from server.pipeline import (
     build_dynamic_graph,
     calculate_token_cost_metrics,
+    combine_token_cost_metrics,
     db_commit_node,
     log_graph_token_audit_ledger,
+    flatten_extraction_results_for_export,
     log_token_cost_metrics,
     normalize_workflow_results,
     record_node_token_audit,
@@ -45,6 +49,8 @@ if missing_env_vars:
 app = FastAPI(title="BExtractor API")
 
 CLIENT_OUT_DIR = (Path(__file__).resolve().parent / ".." / "client" / "out").resolve()
+EXPORT_DIR = (Path(__file__).resolve().parent / "exports").resolve()
+EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class ExtractionRequestPayload(BaseModel):
@@ -279,7 +285,13 @@ class _TeeLogCapture(io.StringIO):
         return self._stream.fileno()
 
 
-async def _extract_stream(upload: UploadFile, request: ExtractionRequestPayload) -> AsyncIterator[str]:
+async def _extract_stream(
+    upload: UploadFile,
+    request: ExtractionRequestPayload,
+    batch_records: list[dict[str, Any]] | None = None,
+    batch_token_metrics: list[dict[str, Any] | None] | None = None,
+    emit_done: bool = True,
+) -> AsyncIterator[str]:
     backend_log_lines: list[str] = []
     backend_log_capture = _TeeLogCapture(sys.__stdout__)
     backend_error_capture = _TeeLogCapture(sys.__stderr__)
@@ -390,6 +402,18 @@ async def _extract_stream(upload: UploadFile, request: ExtractionRequestPayload)
                 backend_log_text = f"{captured_backend_logs}\n\n{backend_log_text}"
             yield _sse("debug_log", {"message": captured_backend_logs or backend_log_text})
 
+            if batch_records is not None:
+                batch_records.append(
+                    flatten_extraction_results_for_export(
+                        file_name=file_name,
+                        extraction_status="Success",
+                        template_payload=template_payload,
+                        parsed_results=extraction_results,
+                    )
+                )
+            if batch_token_metrics is not None:
+                batch_token_metrics.append(token_cost_metrics)
+
             final_payload = {
                 "structured_json": compiled_payload,
                 "database": commit,
@@ -400,7 +424,8 @@ async def _extract_stream(upload: UploadFile, request: ExtractionRequestPayload)
             }
             yield _sse("result", final_payload)
             yield _sse("log", {"tone": "success", "status": "Database insert confirmation returned", "message": "Database insert confirmation returned to client."})
-            yield _sse("done", {"ok": True, "status": "done"})
+            if emit_done:
+                yield _sse("done", {"ok": True, "status": "done"})
     except Exception as exc:
         error_message = f"Extraction failed: {exc}"
         error_details = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
@@ -412,11 +437,83 @@ async def _extract_stream(upload: UploadFile, request: ExtractionRequestPayload)
         backend_log_text = _format_backend_log_export(backend_log_lines, None, [], error_details)
         if captured_backend_logs:
             backend_log_text = f"{captured_backend_logs}\n\n{backend_log_text}"
+        if batch_records is not None:
+            batch_records.append(
+                flatten_extraction_results_for_export(
+                    file_name=upload.filename or "upload.pdf",
+                    extraction_status="Failed",
+                    template_payload=request.model_dump(),
+                    parsed_results={},
+                    error=error_message,
+                )
+            )
         yield _sse("debug_log", {"message": backend_log_text})
         yield _sse("log", {"tone": "error", "status": "Extraction failed", "message": error_message})
         yield _sse_data({"error": error_message, "backend_log_text": backend_log_text})
     finally:
         await upload.close()
+
+
+def _ordered_export_headers(batch_records: list[dict[str, Any]]) -> list[str]:
+    headers = ["File Name", "Extraction Status"]
+    for row in batch_records:
+        for key in row:
+            if key not in headers:
+                headers.append(key)
+    return headers
+
+
+def _write_batch_exports(batch_id: str, batch_records: list[dict[str, Any]]) -> dict[str, Any]:
+    csv_path = EXPORT_DIR / f"batch_{batch_id}.csv"
+    json_path = EXPORT_DIR / f"batch_{batch_id}.json"
+    headers = _ordered_export_headers(batch_records)
+
+    with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=headers, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(batch_records)
+
+    with json_path.open("w", encoding="utf-8") as json_file:
+        json.dump(batch_records, json_file, ensure_ascii=False, indent=2, default=str)
+
+    return {
+        "batch_id": batch_id,
+        "record_count": len(batch_records),
+        "csv_url": f"/exports/{csv_path.name}",
+        "json_url": f"/exports/{json_path.name}",
+        "csv_path": str(csv_path),
+        "json_path": str(json_path),
+    }
+
+
+async def _extract_batch_stream(files: list[UploadFile], request: ExtractionRequestPayload) -> AsyncIterator[str]:
+    batch_id = uuid.uuid4().hex
+    batch_records: list[dict[str, Any]] = []
+    batch_token_metrics: list[dict[str, Any] | None] = []
+    total_files = len(files)
+
+    yield _sse("log", {"tone": "info", "status": "Batch extraction started", "message": f"Starting sequential extraction for {total_files} file(s).", "batch_id": batch_id})
+
+    for index, upload in enumerate(files, start=1):
+        file_name = upload.filename or f"upload_{index}.pdf"
+        yield _sse("log", {"tone": "info", "status": f"Processing file {index}/{total_files}", "message": f"Processing {file_name} ({index} of {total_files})", "batch_id": batch_id, "file_name": file_name})
+        async for event in _extract_stream(
+            upload,
+            request,
+            batch_records=batch_records,
+            batch_token_metrics=batch_token_metrics,
+            emit_done=False,
+        ):
+            yield event
+        yield _sse("log", {"tone": "success", "status": f"Completed file {index}/{total_files}", "message": f"Completed {file_name} ({index} of {total_files})", "batch_id": batch_id, "file_name": file_name})
+        await asyncio.sleep(0)
+
+    batch_metrics = combine_token_cost_metrics(batch_token_metrics)
+    log_token_cost_metrics(batch_metrics)
+    export_info = _write_batch_exports(batch_id, batch_records)
+    yield _sse("batch_export", {"ok": True, "status": "exports_ready", "exports": export_info, "records": batch_records, "token_cost_metrics": batch_metrics})
+    yield _sse("log", {"tone": "success", "status": "Batch exports ready", "message": f"Compiled {len(batch_records)} row(s) into CSV and JSON batch exports.", "exports": export_info})
+    yield _sse("done", {"ok": True, "status": "done", "batch_id": batch_id, "exports": export_info, "token_cost_metrics": batch_metrics})
 
 
 @app.get("/api/health")
@@ -425,8 +522,8 @@ def health_check() -> dict[str, str]:
 
 
 @app.post("/api/extract")
-async def extract_document(file: UploadFile = File(...), payload: str = Form(...)) -> StreamingResponse:
-    """Stream an extraction run as Server-Sent Events for the Next.js right panel."""
+async def extract_document(files: List[UploadFile] = File(...), payload: str = Form(...)) -> StreamingResponse:
+    """Stream one or more extraction runs as Server-Sent Events for the Next.js right panel."""
 
     try:
         template_payload = json.loads(payload)
@@ -445,11 +542,13 @@ async def extract_document(file: UploadFile = File(...), payload: str = Form(...
         )
 
     return StreamingResponse(
-        _extract_stream(file, request_payload),
+        _extract_batch_stream(files, request_payload),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
+
+app.mount("/exports", StaticFiles(directory=EXPORT_DIR), name="exports")
 
 if CLIENT_OUT_DIR.exists():
     app.mount("/_next", StaticFiles(directory=CLIENT_OUT_DIR / "_next"), name="next-static")
