@@ -25,6 +25,7 @@ class DocumentChunk:
 
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
 EMBEDDING_MODEL = "models/gemini-embedding-001"
+EMBEDDING_DIMENSION = 3072
 
 
 def tokenize(text: str) -> list[str]:
@@ -95,7 +96,7 @@ def configure_google_embeddings() -> None:
 
 
 def generate_embedding(text: str) -> list[float]:
-    """Generate a 768-dimensional embedding with Google's gemini-embedding-001 model."""
+    """Generate a 3072-dimensional embedding with Google's gemini-embedding-001 model."""
 
     configure_google_embeddings()
     response = genai.embed_content(model=EMBEDDING_MODEL, content=text, task_type="retrieval_document")
@@ -123,9 +124,9 @@ async def persist_document_chunks(chunks: list[DocumentChunk]) -> None:
         for chunk in chunks:
             embedding = generate_embedding(chunk.content)
             await client.execute_raw(
-                '''
+                f'''
                 INSERT INTO "DocumentChunk" ("id", "extraction_id", "chunk_text", "embedding", "metadata")
-                VALUES ($1, $2, $3, $4::vector, $5::jsonb)
+                VALUES ($1, $2, $3, $4::vector({EMBEDDING_DIMENSION}), $5::jsonb)
                 ON CONFLICT ("id") DO UPDATE SET
                     "chunk_text" = EXCLUDED."chunk_text",
                     "embedding" = EXCLUDED."embedding",
