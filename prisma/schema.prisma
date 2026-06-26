@@ -44,7 +44,7 @@ model DocumentChunk {
   id            String           @id @default(uuid())
   extraction_id String
   chunk_text    String
-  embedding     Unsupported("vector(768)")
+  embedding     Unsupported("vector(3072)")
   metadata      Json?
   extraction    ExtractionResult @relation(fields: [extraction_id], references: [id], onDelete: Cascade)
 }
