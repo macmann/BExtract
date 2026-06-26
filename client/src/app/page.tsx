@@ -10,6 +10,8 @@ import {
   CircleDollarSign,
   ClipboardList,
   DatabaseZap,
+  Download,
+  FileJson,
   Gauge,
   Layers3,
   Play,
@@ -17,6 +19,7 @@ import {
   RefreshCw,
   Search,
   ShieldCheck,
+  Settings2,
   TerminalSquare,
   UploadCloud,
   X,
@@ -204,7 +207,7 @@ function BExtractorLogo({ isActive }: { isActive: boolean }) {
   );
 }
 
-function ExtractionLoadingPanel({ logs, isLoading }: { logs: RuntimeLog[]; isLoading: boolean }) {
+function ExtractionLoadingPanel({ logs, isLoading, showDebugLogs }: { logs: RuntimeLog[]; isLoading: boolean; showDebugLogs: boolean }) {
   const activeLog = logs.at(-1)?.text ?? "Initializing extraction stream...";
 
   return (
@@ -218,7 +221,14 @@ function ExtractionLoadingPanel({ logs, isLoading }: { logs: RuntimeLog[]; isLoa
             <span className="line-clamp-1">{activeLog}</span>
           </div>
         </div>
-        <LogsPanel logs={logs} isLoading={isLoading} compact />
+        {showDebugLogs ? (
+          <LogsPanel logs={logs} isLoading={isLoading} compact />
+        ) : (
+          <div className="rounded-2xl border border-slate-700 bg-slate-950/70 p-5 text-sm text-slate-300">
+            <p className="font-semibold text-slate-100">Debug logs are hidden.</p>
+            <p className="mt-2 text-slate-400">Enable the debugging panel in Settings to inspect runtime events while extraction runs.</p>
+          </div>
+        )}
       </div>
     </section>
   );
@@ -255,12 +265,19 @@ function LogsPanel({ logs, isLoading, compact = false }: { logs: RuntimeLog[]; i
   );
 }
 
-function ResultsPanel({ results }: { results: ExtractionResult[] }) {
+function ResultsPanel({ results, onDownload, onSendToMcp }: { results: ExtractionResult[]; onDownload: (format: "csv" | "json") => void; onSendToMcp: () => void }) {
   return (
     <section className="mt-4 rounded-2xl border border-slate-700 bg-slate-900/80 p-4">
-      <div className="mb-3 flex items-center justify-between">
-        <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-100"><ShieldCheck className="h-4 w-4 text-emerald-300" /> Extraction Results</h2>
-        <span className="text-xs text-slate-500">3 fields · schema v2.1</span>
+      <div className="mb-3 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+        <div>
+          <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-100"><ShieldCheck className="h-4 w-4 text-emerald-300" /> Extraction Results</h2>
+          <span className="text-xs text-slate-500">{results.length} fields · schema v2.1</span>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button onClick={() => onDownload("csv")} disabled={results.length === 0} className="inline-flex items-center gap-2 rounded-lg border border-cyan-300/30 bg-cyan-300/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.16em] text-cyan-100 hover:border-cyan-200 disabled:cursor-not-allowed disabled:opacity-40"><Download className="h-4 w-4" /> CSV</button>
+          <button onClick={() => onDownload("json")} disabled={results.length === 0} className="inline-flex items-center gap-2 rounded-lg border border-cyan-300/30 bg-cyan-300/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.16em] text-cyan-100 hover:border-cyan-200 disabled:cursor-not-allowed disabled:opacity-40"><FileJson className="h-4 w-4" /> JSON</button>
+          <button onClick={onSendToMcp} className="inline-flex items-center gap-2 rounded-lg border border-amber-300/30 bg-amber-300/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.16em] text-amber-100 hover:border-amber-200"><DatabaseZap className="h-4 w-4" /> MCP</button>
+        </div>
       </div>
       <div className="space-y-3">
         {results.map((result) => (
@@ -295,6 +312,8 @@ export default function Home() {
   const [runtimeLogs, setRuntimeLogs] = useState<RuntimeLog[]>(initialLogs);
   const [extractionResults, setExtractionResults] = useState<ExtractionResult[]>(initialResults);
   const [isLoading, setIsLoading] = useState(false);
+  const [showDebugPanel, setShowDebugPanel] = useState(false);
+  const [templateName, setTemplateName] = useState("BExtractor Template");
   const addField = () => setFields((current) => [...current, { id: Date.now(), name: "", definition: "", routeType: "Scalar", dataType: "String" }]);
   const updateField = (updated: FieldCard) => setFields((current) => current.map((field) => (field.id === updated.id ? updated : field)));
 
@@ -387,6 +406,46 @@ export default function Home() {
     return dataText;
   };
 
+
+  const safeTemplateName = () => (templateName.trim() || file?.name.replace(/\.pdf$/i, "") || "bextract-output").trim();
+
+  const serializeResultsForDownload = () => ({
+    templateName: safeTemplateName(),
+    exportedAt: new Date().toISOString(),
+    results: extractionResults.map((result) => ({
+      field: result.field,
+      value: result.value,
+      confidence: result.confidence,
+      status: result.status,
+      alert: result.alert ?? "",
+    })),
+  });
+
+  const escapeCsvCell = (value: string) => `"${value.replace(/"/g, '""')}"`;
+
+  const handleDownloadOutput = (format: "csv" | "json") => {
+    const payload = serializeResultsForDownload();
+    const slug = payload.templateName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "bextract-output";
+    const content = format === "json"
+      ? JSON.stringify(payload, null, 2)
+      : [
+          ["template_name", "field", "value", "confidence", "status", "alert"],
+          ...payload.results.map((result) => [payload.templateName, result.field, result.value, result.confidence, result.status, result.alert]),
+        ].map((row) => row.map((cell) => escapeCsvCell(String(cell))).join(",")).join("\n");
+    const blob = new Blob([content], { type: format === "json" ? "application/json" : "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${slug}-results.${format}`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    appendLog("success", `Downloaded ${payload.templateName} output as ${format.toUpperCase()}.`);
+  };
+
+  const handleSendToMcp = () => {
+    appendLog("info", "MCP database delivery is a placeholder. Connector configuration will be added in a future release.");
+  };
+
   const handleRunExtraction = async () => {
     if (isLoading) return;
 
@@ -442,23 +501,39 @@ export default function Home() {
   return (
     <main className="min-h-screen bg-[#060913] text-slate-100">
       <div className="flex min-h-screen">
-        <section className="w-[60%] border-r border-cyan-300/10 bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.14),transparent_32%),linear-gradient(180deg,#0f172a,#070b14)] p-5">
+        <section className={`${showDebugPanel ? "w-full xl:w-[60%] xl:border-r" : "w-full"} border-cyan-300/10 bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.14),transparent_32%),linear-gradient(180deg,#0f172a,#070b14)] p-5 transition-all duration-500`}>
           <header className="mb-5 flex items-center justify-between">
             <div>
               <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.28em] text-cyan-300"><CircleDollarSign className="h-4 w-4" /> BExtractor</p>
               <h1 className="mt-2 text-2xl font-black tracking-tight text-white">Template Configurator</h1>
             </div>
-            <div className="flex gap-2"><button onClick={handleRunExtraction} disabled={isLoading} className="inline-flex items-center gap-2 rounded-xl bg-emerald-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-emerald-200 disabled:cursor-not-allowed disabled:opacity-60"><Search className={`h-4 w-4 ${isLoading ? "animate-pulse" : ""}`} /> {isLoading ? "Extracting..." : "Run Extraction"}</button><button onClick={addField} className="inline-flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-cyan-200"><Plus className="h-4 w-4" /> Add Field</button></div>
+            <div className="flex flex-wrap justify-end gap-2"><button onClick={handleRunExtraction} disabled={isLoading} className="inline-flex items-center gap-2 rounded-xl bg-emerald-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-emerald-200 disabled:cursor-not-allowed disabled:opacity-60"><Search className={`h-4 w-4 ${isLoading ? "animate-pulse" : ""}`} /> {isLoading ? "Extracting..." : "Run Extraction"}</button><button onClick={addField} className="inline-flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-cyan-200"><Plus className="h-4 w-4" /> Add Field</button></div>
           </header>
+          <div className="mb-4 grid gap-3 rounded-2xl border border-slate-700/70 bg-slate-950/50 p-4 lg:grid-cols-[1fr_auto] lg:items-end">
+            <label className="space-y-1.5">
+              <span className="text-xs font-bold uppercase tracking-[0.22em] text-slate-400">Template Name</span>
+              <input value={templateName} onChange={(event) => setTemplateName(event.target.value)} className="terminal-input" placeholder="Name used in CSV/JSON exports" />
+            </label>
+            <label className="inline-flex cursor-pointer items-center gap-3 rounded-xl border border-slate-700 bg-slate-900/70 px-4 py-3 text-sm font-semibold text-slate-200">
+              <input type="checkbox" checked={showDebugPanel} onChange={(event) => setShowDebugPanel(event.target.checked)} className="h-4 w-4 accent-cyan-300" />
+              <Settings2 className="h-4 w-4 text-cyan-300" />
+              Enable debugging panel
+            </label>
+          </div>
           <UploadDropzone file={file} onFileChange={setFile} />
-          <ExtractionLoadingPanel logs={runtimeLogs} isLoading={isLoading} />
-          <div className={`mt-4 grid gap-4 transition-all duration-700 2xl:grid-cols-2 ${isLoading ? "translate-y-2 opacity-30" : "translate-y-0 opacity-100"}`}>
+          <ExtractionLoadingPanel logs={runtimeLogs} isLoading={isLoading} showDebugLogs={showDebugPanel} />
+          <div className={`mt-4 grid gap-4 transition-all duration-700 ${showDebugPanel ? "2xl:grid-cols-2" : "xl:grid-cols-2 2xl:grid-cols-3"} ${isLoading ? "translate-y-2 opacity-30" : "translate-y-0 opacity-100"}`}>
             {fields.map((field) => <FieldCardEditor key={field.id} field={field} result={extractionResults.find((result) => result.fieldId === String(field.id) || result.field === field.name)} onChange={updateField} onRemove={() => setFields((current) => current.filter((item) => item.id !== field.id))} />)}
           </div>
+          {!showDebugPanel && (
+            <div className={`mx-auto max-w-6xl transition-all duration-700 ${isLoading ? "translate-y-2 opacity-0" : "translate-y-0 opacity-100"}`}>
+              <ResultsPanel results={extractionResults} onDownload={handleDownloadOutput} onSendToMcp={handleSendToMcp} />
+            </div>
+          )}
           <PdfPreview file={file} />
         </section>
 
-        <aside className="w-[40%] bg-[linear-gradient(180deg,#0b1020,#05070d)] p-5">
+        {showDebugPanel && <aside className="hidden w-[40%] bg-[linear-gradient(180deg,#0b1020,#05070d)] p-5 xl:block">
           <div className="mb-5 grid grid-cols-3 gap-3">
             {[{ label: "Run", value: "ADK-2049", icon: Play }, { label: "Chunks", value: "018", icon: DatabaseZap }, { label: "SLA", value: "1.8s", icon: Gauge }].map((metric) => {
               const Icon = metric.icon;
@@ -477,11 +552,11 @@ export default function Home() {
             <div><p className="text-sm font-semibold text-slate-100">Runtime Extraction Logs & Results</p><p className="text-xs text-slate-500">Validation agent monitoring financial extraction output.</p></div>
           </div>
           <LogsPanel logs={runtimeLogs} isLoading={isLoading} />
-          <div className={`transition-all duration-700 ${isLoading ? "translate-y-2 opacity-0" : "translate-y-0 opacity-100"}`}><ResultsPanel results={extractionResults} /></div>
+          <div className={`transition-all duration-700 ${isLoading ? "translate-y-2 opacity-0" : "translate-y-0 opacity-100"}`}><ResultsPanel results={extractionResults} onDownload={handleDownloadOutput} onSendToMcp={handleSendToMcp} /></div>
           <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-950/80 p-4 text-xs text-slate-400">
             <ClipboardList className="mb-2 h-4 w-4 text-cyan-300" /> Audit trail sealed with immutable run metadata. Source citations remain attached to every field-level decision.
           </div>
-        </aside>
+        </aside>}
       </div>
     </main>
   );
