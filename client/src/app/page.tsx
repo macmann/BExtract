@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import type { ChangeEvent } from "react";
 import {
   AlertTriangle,
   Bot,
@@ -39,6 +40,12 @@ type ExtractionResult = {
   alert?: string;
 };
 
+type RuntimeLog = {
+  time: string;
+  tone: "info" | "success" | "warn" | "error";
+  text: string;
+};
+
 const initialFields: FieldCard[] = [
   {
     id: 1,
@@ -56,17 +63,11 @@ const initialFields: FieldCard[] = [
   },
 ];
 
-const logs = [
-  { time: "09:41:02", tone: "info", text: "Document accepted: LPA_Q2_Final.pdf" },
-  { time: "09:41:03", tone: "info", text: "Ingesting chunks into retrieval index..." },
-  { time: "09:41:06", tone: "success", text: "18 sections normalized with OCR overlays." },
-  { time: "09:41:08", tone: "info", text: "Running ADK loop: template route planning." },
-  { time: "09:41:11", tone: "warn", text: "Math validation failed for Net Asset Value." },
-  { time: "09:41:13", tone: "info", text: "Queued AI re-try with stricter arithmetic guardrails." },
-  { time: "09:41:15", tone: "success", text: "Scalar fields passed schema validation." },
+const initialLogs: RuntimeLog[] = [
+  { time: "--:--:--", tone: "info", text: "Upload a PDF and run extraction to stream backend logs." },
 ];
 
-const results: ExtractionResult[] = [
+const initialResults: ExtractionResult[] = [
   { field: "Total Commitment", value: "$42,000,000", confidence: "99.2%", status: "validated" },
   { field: "Effective Date", value: "2026-04-01", confidence: "96.8%", status: "validated" },
   {
@@ -78,7 +79,7 @@ const results: ExtractionResult[] = [
   },
 ];
 
-function UploadDropzone() {
+function UploadDropzone({ file, onFileChange }: { file: File | null; onFileChange: (file: File | null) => void }) {
   return (
     <div className="group relative overflow-hidden rounded-2xl border border-dashed border-cyan-400/40 bg-cyan-400/[0.03] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] transition hover:border-cyan-300/70 hover:bg-cyan-400/[0.06]">
       <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-cyan-300/70 to-transparent" />
@@ -88,11 +89,12 @@ function UploadDropzone() {
         </div>
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold uppercase tracking-[0.22em] text-cyan-100">Upload Document</p>
-          <p className="mt-1 text-xs text-slate-400">Drop PDF, XLSX, or investor packet files here. OCR and chunking start immediately.</p>
+          <p className="mt-1 text-xs text-slate-400">{file ? file.name : "Drop or browse for a PDF. OCR and chunking start when you run extraction."}</p>
         </div>
-        <button className="rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-200 shadow-sm transition hover:border-cyan-300 hover:text-cyan-100">
+        <label className="cursor-pointer rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-200 shadow-sm transition hover:border-cyan-300 hover:text-cyan-100">
           Browse
-        </button>
+          <input className="sr-only" type="file" accept="application/pdf,.pdf" onChange={(event: ChangeEvent<HTMLInputElement>) => onFileChange(event.target.files?.[0] ?? null)} />
+        </label>
       </div>
     </div>
   );
@@ -139,18 +141,18 @@ function FieldCardEditor({ field, onChange, onRemove }: { field: FieldCard; onCh
   );
 }
 
-function LogsPanel() {
+function LogsPanel({ logs, isLoading }: { logs: RuntimeLog[]; isLoading: boolean }) {
   return (
     <section className="rounded-2xl border border-slate-700 bg-slate-950/80 shadow-2xl shadow-black/30">
       <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-800 bg-slate-950/95 px-4 py-3 backdrop-blur">
         <div className="flex items-center gap-2 text-sm font-semibold text-slate-100"><TerminalSquare className="h-4 w-4 text-cyan-300" /> Runtime Extraction Logs</div>
-        <span className="rounded-full bg-emerald-400/10 px-2 py-1 text-[10px] font-bold uppercase tracking-widest text-emerald-300">Live</span>
+        <span className="rounded-full bg-emerald-400/10 px-2 py-1 text-[10px] font-bold uppercase tracking-widest text-emerald-300">{isLoading ? "Live" : "Idle"}</span>
       </div>
       <div className="max-h-64 space-y-2 overflow-y-auto p-4 font-mono text-xs">
         {logs.map((log) => (
           <div key={`${log.time}-${log.text}`} className="grid grid-cols-[64px_1fr] gap-3 rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2">
             <span className="text-slate-500">{log.time}</span>
-            <span className={log.tone === "success" ? "text-emerald-300" : log.tone === "warn" ? "text-amber-300" : "text-cyan-100"}>{log.text}</span>
+            <span className={log.tone === "success" ? "text-emerald-300" : log.tone === "warn" ? "text-amber-300" : log.tone === "error" ? "text-red-300" : "text-cyan-100"}>{log.text}</span>
           </div>
         ))}
       </div>
@@ -158,7 +160,7 @@ function LogsPanel() {
   );
 }
 
-function ResultsPanel() {
+function ResultsPanel({ results }: { results: ExtractionResult[] }) {
   return (
     <section className="mt-4 rounded-2xl border border-slate-700 bg-slate-900/80 p-4">
       <div className="mb-3 flex items-center justify-between">
@@ -194,8 +196,78 @@ function ResultsPanel() {
 
 export default function Home() {
   const [fields, setFields] = useState(initialFields);
+  const [file, setFile] = useState<File | null>(null);
+  const [runtimeLogs, setRuntimeLogs] = useState<RuntimeLog[]>(initialLogs);
+  const [extractionResults, setExtractionResults] = useState<ExtractionResult[]>(initialResults);
+  const [isLoading, setIsLoading] = useState(false);
   const addField = () => setFields((current) => [...current, { id: Date.now(), name: "", definition: "", routeType: "Scalar", dataType: "String" }]);
   const updateField = (updated: FieldCard) => setFields((current) => current.map((field) => (field.id === updated.id ? updated : field)));
+
+  const timestamp = () => new Date().toLocaleTimeString("en-US", { hour12: false });
+  const appendLog = (tone: RuntimeLog["tone"], text: string) => setRuntimeLogs((current) => [...current, { time: timestamp(), tone, text }]);
+
+  const handleRunExtraction = async () => {
+    if (!file) {
+      appendLog("warn", "Select a PDF before starting extraction.");
+      return;
+    }
+
+    setIsLoading(true);
+    setRuntimeLogs([]);
+    setExtractionResults([]);
+
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("payload", JSON.stringify({
+      items: fields.map((field) => ({
+        id: String(field.id),
+        name: field.name,
+        definition: field.definition,
+        type: field.routeType,
+        dataType: field.dataType,
+      })),
+    }));
+
+    try {
+      const response = await fetch("/api/extract", { method: "POST", body: formData });
+      if (!response.ok || !response.body) throw new Error(`Extraction request failed with ${response.status}`);
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split("\n\n");
+        buffer = events.pop() ?? "";
+
+        for (const rawEvent of events) {
+          const eventName = rawEvent.match(/^event: (.+)$/m)?.[1];
+          const dataLine = rawEvent.match(/^data: (.+)$/m)?.[1];
+          if (!dataLine) continue;
+          const data = JSON.parse(dataLine);
+          if (eventName === "log") appendLog(data.tone ?? "info", data.message);
+          if (eventName === "result") {
+            const rows = Object.values(data.structured_json?.results ?? {}) as Array<Record<string, unknown>>;
+            setExtractionResults(rows.map((row) => ({
+              field: String(row.field_name ?? row.item_id ?? "Unknown field"),
+              value: String(row.value ?? ""),
+              confidence: typeof row.confidence === "number" ? `${Math.round(row.confidence * 100)}%` : String(row.confidence ?? "n/a"),
+              status: "validated",
+            })));
+            appendLog("success", `Database status: ${data.database?.status ?? "confirmed"}`);
+          }
+          if (eventName === "error") appendLog("error", data.detail ?? "Unknown extraction error");
+        }
+      }
+    } catch (error) {
+      appendLog("error", error instanceof Error ? error.message : "Extraction request failed");
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   return (
     <main className="min-h-screen bg-[#060913] text-slate-100">
@@ -206,9 +278,9 @@ export default function Home() {
               <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.28em] text-cyan-300"><CircleDollarSign className="h-4 w-4" /> BExtractor</p>
               <h1 className="mt-2 text-2xl font-black tracking-tight text-white">Template Configurator</h1>
             </div>
-            <button onClick={addField} className="inline-flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-cyan-200"><Plus className="h-4 w-4" /> Add Field</button>
+            <div className="flex gap-2"><button onClick={handleRunExtraction} disabled={isLoading} className="inline-flex items-center gap-2 rounded-xl bg-emerald-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-emerald-200 disabled:cursor-not-allowed disabled:opacity-60"><Play className="h-4 w-4" /> {isLoading ? "Running" : "Run"}</button><button onClick={addField} className="inline-flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-cyan-200"><Plus className="h-4 w-4" /> Add Field</button></div>
           </header>
-          <UploadDropzone />
+          <UploadDropzone file={file} onFileChange={setFile} />
           <div className="mt-4 grid gap-4 2xl:grid-cols-2">
             {fields.map((field) => <FieldCardEditor key={field.id} field={field} onChange={updateField} onRemove={() => setFields((current) => current.filter((item) => item.id !== field.id))} />)}
           </div>
@@ -232,8 +304,8 @@ export default function Home() {
             <Bot className="h-5 w-5 text-cyan-300" />
             <div><p className="text-sm font-semibold text-slate-100">Runtime Extraction Logs & Results</p><p className="text-xs text-slate-500">Validation agent monitoring financial extraction output.</p></div>
           </div>
-          <LogsPanel />
-          <ResultsPanel />
+          <LogsPanel logs={runtimeLogs} isLoading={isLoading} />
+          <ResultsPanel results={extractionResults} />
           <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-950/80 p-4 text-xs text-slate-400">
             <ClipboardList className="mb-2 h-4 w-4 text-cyan-300" /> Audit trail sealed with immutable run metadata. Source citations remain attached to every field-level decision.
           </div>
