@@ -20,7 +20,7 @@ from server.custom_tools import search_tool
 INPUT_RATE_PER_MILLION = 1.50
 OUTPUT_RATE_PER_MILLION = 9.00
 
-def _reset_llm_request_to_stateless_turn(_ctx, llm_request) -> None:
+def _reset_llm_request_to_stateless_turn(callback_context=None, llm_request=None, **_kwargs) -> None:
     """Strip ADK chat history before each model call.
 
     The dynamic workflow invokes extractor agents once per template item. ADK
@@ -30,6 +30,9 @@ def _reset_llm_request_to_stateless_turn(_ctx, llm_request) -> None:
     interaction pointer. Returning ``None`` lets ADK continue with the sanitized
     request.
     """
+
+    if llm_request is None:
+        return None
 
     llm_request.previous_interaction_id = None
     if not llm_request.contents:
