@@ -181,6 +181,75 @@ def calculate_token_cost_metrics(workflow_output: Any) -> dict[str, Any]:
     }
 
 
+
+def combine_token_cost_metrics(metrics_list: list[dict[str, Any] | None]) -> dict[str, Any]:
+    """Sum token usage and cost metrics across a batch of extraction runs."""
+
+    totals = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "input_cost": 0.0,
+        "output_cost": 0.0,
+        "total_cost": 0.0,
+    }
+    for metrics in metrics_list:
+        if not metrics:
+            continue
+        input_tokens = int(metrics.get("input_tokens", 0) or 0)
+        output_tokens = int(metrics.get("output_tokens", 0) or 0)
+        totals["input_tokens"] += input_tokens
+        totals["output_tokens"] += output_tokens
+        totals["total_tokens"] += int(metrics.get("total_tokens", input_tokens + output_tokens) or 0)
+        totals["input_cost"] += float(metrics.get("input_cost", 0.0) or 0.0)
+        totals["output_cost"] += float(metrics.get("output_cost", 0.0) or 0.0)
+        totals["total_cost"] += float(metrics.get("total_cost", 0.0) or 0.0)
+    if totals["total_tokens"] == 0:
+        totals["total_tokens"] = totals["input_tokens"] + totals["output_tokens"]
+    if totals["total_cost"] == 0.0:
+        totals["total_cost"] = totals["input_cost"] + totals["output_cost"]
+    return totals
+
+
+def flatten_extraction_results_for_export(
+    file_name: str,
+    extraction_status: str,
+    template_payload: dict[str, Any],
+    parsed_results: dict[str, Any],
+    error: str | None = None,
+) -> dict[str, Any]:
+    """Create one flat spreadsheet row from a document's field-card results."""
+
+    row_record: dict[str, Any] = {
+        "File Name": file_name,
+        "Extraction Status": extraction_status,
+    }
+    if error:
+        row_record["Error"] = error
+
+    seen_result_ids: set[str] = set()
+    items = template_payload.get("items") or template_payload.get("fields") or []
+    for index, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("id") or item.get("key") or item.get("name") or f"item_{index}")
+        field_name = str(item.get("name") or item_id)
+        result = parsed_results.get(item_id, {}) if isinstance(parsed_results, dict) else {}
+        row_record[field_name] = result.get("value") if isinstance(result, dict) else result
+        seen_result_ids.add(item_id)
+
+    if isinstance(parsed_results, dict):
+        for item_id, result in parsed_results.items():
+            if str(item_id) in seen_result_ids:
+                continue
+            if isinstance(result, dict):
+                field_name = str(result.get("field_name") or result.get("table_name") or item_id)
+                row_record[field_name] = result.get("value", result.get("rows"))
+            else:
+                row_record[str(item_id)] = result
+
+    return row_record
+
 def log_token_cost_metrics(metrics: dict[str, Any]) -> None:
     """Print a structured terminal block for extraction token usage and cost."""
 
