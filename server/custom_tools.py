@@ -40,4 +40,4 @@ def document_hybrid_search(field_name: str, definition: str) -> str:
     return "\n\n".join(formatted_chunks)
 
 
-search_tool = FunctionTool.from_function(document_hybrid_search)
+search_tool = FunctionTool(document_hybrid_search)
