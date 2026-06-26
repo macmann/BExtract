@@ -1,14 +1,18 @@
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 generator pyclient {
-  provider = "prisma-client-py"
+  provider        = "prisma-client-py"
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  directUrl  = env("DIRECT_URL")
+  extensions = [vector]
 }
 
 model DocumentTemplate {
@@ -33,4 +37,14 @@ model ExtractionResult {
   updatedAt   DateTime         @updatedAt
   templateId  String?
   template    DocumentTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  chunks      DocumentChunk[]
+}
+
+model DocumentChunk {
+  id            String           @id @default(uuid())
+  extraction_id String
+  chunk_text    String
+  embedding     Unsupported("vector(768)")
+  metadata      Json?
+  extraction    ExtractionResult @relation(fields: [extraction_id], references: [id], onDelete: Cascade)
 }

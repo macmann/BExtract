@@ -64,7 +64,7 @@ async def _extract_stream(upload: UploadFile, template_payload: dict[str, Any]) 
         document_id = Path(file_name).stem or "uploaded_document"
 
         yield _sse("log", {"tone": "info", "status": f"Document accepted: {file_name}", "message": f"Document accepted: {file_name}"})
-        chunks = ingest_document(uploaded_bytes, document_id=document_id)
+        chunks = await ingest_document(uploaded_bytes, document_id=document_id)
         raw_text = "\n\n".join(chunk.content for chunk in chunks)
         yield _sse("log", {"tone": "success", "status": f"Indexed {len(chunks)} PDF text chunks", "message": f"{len(chunks)} PDF text chunks indexed for hybrid retrieval."})
 

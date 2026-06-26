@@ -2,42 +2,102 @@
 
 from __future__ import annotations
 
+import asyncio
+
+import google.generativeai as genai
 from google.adk.tools import FunctionTool
+from rank_bm25 import BM25Okapi
 
-from server.ingestion import MOCK_INDEX, bm25_score, ensure_seed_index, tokenize, vector_score
+from server.ingestion import EMBEDDING_MODEL, configure_google_embeddings, tokenize, vector_literal
 
 
-def _rank_by_score(scores: dict[str, float]) -> list[str]:
-    return [chunk_id for chunk_id, _ in sorted(scores.items(), key=lambda item: item[1], reverse=True)]
+async def _fetch_dense_matches(query_embedding: list[float]) -> list[dict[str, object]]:
+    """Return the 10 nearest pgvector chunks by cosine distance."""
+
+    from prisma import Prisma
+
+    client = Prisma()
+    await client.connect()
+    try:
+        rows = await client.query_raw(
+            '''
+            SELECT "id", "chunk_text", "metadata", "embedding" <=> $1::vector AS distance
+            FROM "DocumentChunk"
+            ORDER BY "embedding" <=> $1::vector
+            LIMIT 10
+            ''',
+            vector_literal(query_embedding),
+        )
+        return [dict(row) for row in rows]
+    finally:
+        await client.disconnect()
+
+
+async def _fetch_all_chunks() -> list[dict[str, object]]:
+    """Load text chunks for sparse BM25 ranking."""
+
+    from prisma import Prisma
+
+    client = Prisma()
+    await client.connect()
+    try:
+        rows = await client.query_raw('SELECT "id", "chunk_text", "metadata" FROM "DocumentChunk"')
+        return [dict(row) for row in rows]
+    finally:
+        await client.disconnect()
+
+
+def _query_embedding(text: str) -> list[float]:
+    configure_google_embeddings()
+    response = genai.embed_content(model=EMBEDDING_MODEL, content=text, task_type="retrieval_query")
+    embedding = response["embedding"] if isinstance(response, dict) else response.embedding
+    return [float(value) for value in embedding]
+
+
+def _sparse_bm25_matches(query: str, chunks: list[dict[str, object]], limit: int = 10) -> list[dict[str, object]]:
+    tokenized_corpus = [tokenize(str(chunk.get("chunk_text") or "")) for chunk in chunks]
+    if not tokenized_corpus:
+        return []
+
+    bm25 = BM25Okapi(tokenized_corpus)
+    scores = bm25.get_scores(tokenize(query))
+    ranked_indexes = sorted(range(len(scores)), key=lambda index: scores[index], reverse=True)[:limit]
+    return [{**chunks[index], "bm25_score": float(scores[index])} for index in ranked_indexes]
+
+
+def _reciprocal_rank_fusion(rankings: list[list[dict[str, object]]], rank_constant: int = 60) -> list[str]:
+    fused_scores: dict[str, float] = {}
+    for ranking in rankings:
+        for rank, row in enumerate(ranking, start=1):
+            chunk_id = str(row.get("id") or "")
+            if not chunk_id:
+                continue
+            fused_scores[chunk_id] = fused_scores.get(chunk_id, 0.0) + 1.0 / (rank_constant + rank)
+    return [chunk_id for chunk_id, _ in sorted(fused_scores.items(), key=lambda item: item[1], reverse=True)]
+
+
+async def _document_hybrid_search(field_name: str, definition: str) -> str:
+    query = f"{field_name} {definition}".strip()
+    query_embedding = _query_embedding(query)
+
+    dense_matches, all_chunks = await asyncio.gather(_fetch_dense_matches(query_embedding), _fetch_all_chunks())
+    sparse_matches = _sparse_bm25_matches(query, all_chunks)
+
+    chunks_by_id = {str(chunk.get("id")): chunk for chunk in all_chunks}
+    for dense_match in dense_matches:
+        chunks_by_id[str(dense_match.get("id"))] = dense_match
+
+    fused_chunk_ids = _reciprocal_rank_fusion([dense_matches, sparse_matches])[:3]
+    if not fused_chunk_ids:
+        return "No relevant chunks found."
+
+    return "\n\n".join(str(chunks_by_id[chunk_id].get("chunk_text") or "") for chunk_id in fused_chunk_ids)
 
 
 def document_hybrid_search(field_name: str, definition: str) -> str:
-    """Return the top three layout-aware chunks using simulated hybrid RAG search."""
+    """Return the top three chunks using pgvector + BM25 reciprocal rank fusion."""
 
-    ensure_seed_index()
-    query = f"{field_name} {definition}".strip()
-    query_terms = tokenize(query)
-
-    vector_scores = {chunk_id: vector_score(query_terms, chunk_id) for chunk_id in MOCK_INDEX["chunks"]}
-    bm25_scores = {chunk_id: bm25_score(query_terms, chunk_id) for chunk_id in MOCK_INDEX["chunks"]}
-    vector_ranking = _rank_by_score(vector_scores)
-    bm25_ranking = _rank_by_score(bm25_scores)
-
-    fused_scores: dict[str, float] = {}
-    rank_constant = 60
-    for ranking in (vector_ranking, bm25_ranking):
-        for rank, chunk_id in enumerate(ranking, start=1):
-            fused_scores[chunk_id] = fused_scores.get(chunk_id, 0.0) + 1.0 / (rank_constant + rank)
-
-    top_chunk_ids = [chunk_id for chunk_id, _ in sorted(fused_scores.items(), key=lambda item: item[1], reverse=True)[:3]]
-    if not top_chunk_ids:
-        return "No relevant chunks found."
-
-    formatted_chunks = []
-    for position, chunk_id in enumerate(top_chunk_ids, start=1):
-        chunk = MOCK_INDEX["chunks"][chunk_id]
-        formatted_chunks.append(f"{position}. [{chunk.chunk_type}] {chunk.content}")
-    return "\n\n".join(formatted_chunks)
+    return asyncio.run(_document_hybrid_search(field_name, definition))
 
 
 search_tool = FunctionTool(document_hybrid_search)
