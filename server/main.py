@@ -15,7 +15,14 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from server.ingestion import ingest_document
-from server.pipeline import build_dynamic_graph, db_commit_node, normalize_workflow_results, workflow_progress
+from server.pipeline import (
+    build_dynamic_graph,
+    calculate_token_cost_metrics,
+    db_commit_node,
+    log_token_cost_metrics,
+    normalize_workflow_results,
+    workflow_progress,
+)
 
 REQUIRED_ENV_VARS = ("GOOGLE_API_KEY", "DATABASE_URL", "DIRECT_URL")
 missing_env_vars = [name for name in REQUIRED_ENV_VARS if not os.getenv(name)]
@@ -179,10 +186,13 @@ async def _extract_stream(upload: UploadFile, template_payload: dict[str, Any]) 
             "status": "validated",
         }
         commit = await _fallback_commit(compiled_payload)
+        token_cost_metrics = calculate_token_cost_metrics(workflow_output)
+        log_token_cost_metrics(token_cost_metrics)
 
         final_payload = {
             "structured_json": compiled_payload,
             "database": commit,
+            "token_cost_metrics": token_cost_metrics,
         }
         yield _sse("result", final_payload)
         yield _sse("log", {"tone": "success", "status": "Database insert confirmation returned", "message": "Database insert confirmation returned to client."})

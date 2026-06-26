@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from server.pipeline import _parse_critic_response, route_critic_result
 
 
@@ -62,3 +64,45 @@ def test_normalize_workflow_results_matches_keys_case_space_and_underscore_insen
 
     assert normalized["rating_action"]["value"] == "Affirmed"
     assert normalized["rating_action"]["confidence"] == 0.93
+
+
+def test_calculate_token_cost_metrics_sums_adk_event_usage_metadata():
+    from server.pipeline import calculate_token_cost_metrics
+
+    workflow_output = {
+        "events": [
+            {"content": {"usage_metadata": {"prompt_token_count": 1000, "candidates_token_count": 200}}},
+            {"content": {"usageMetadata": {"promptTokenCount": 3000, "candidatesTokenCount": 800}}},
+        ],
+        "state": {"usage_metadata": {"prompt_token_count": 999999, "candidates_token_count": 999999}},
+    }
+
+    metrics = calculate_token_cost_metrics(workflow_output)
+
+    assert metrics["input_tokens"] == 4000
+    assert metrics["output_tokens"] == 1000
+    assert metrics["total_tokens"] == 5000
+    assert metrics["input_cost"] == 0.006
+    assert metrics["output_cost"] == pytest.approx(0.009)
+    assert metrics["total_cost"] == pytest.approx(0.015)
+
+
+def test_log_token_cost_metrics_prints_formatted_block(capsys):
+    from server.pipeline import log_token_cost_metrics
+
+    log_token_cost_metrics(
+        {
+            "input_tokens": 1234,
+            "output_tokens": 56,
+            "total_tokens": 1290,
+            "input_cost": 0.001851,
+            "output_cost": 0.000504,
+            "total_cost": 0.002355,
+        }
+    )
+
+    captured = capsys.readouterr().out
+    assert "=== BEXTRACT TOKEN & COST METRICS ===" in captured
+    assert "[Input]   Tokens: 1,234 | Cost: $0.0019" in captured
+    assert "[Output]  Tokens: 56 | Cost: $0.0005" in captured
+    assert "[Total]   Tokens: 1,290 | Total Cost: $0.0024" in captured
