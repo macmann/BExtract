@@ -183,10 +183,10 @@ python -m pip install -r requirements.txt
 
 ### Step 4: Run the Server
 
-Start the FastAPI server from the `server` directory:
+Start the FastAPI server from the repository root so Python can resolve the `server` package imports correctly:
 
 ```bash
-uvicorn main:app --reload --port 8000
+uvicorn server.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 Then open:
@@ -212,7 +212,13 @@ Typical Render lifecycle:
 
 ```bash
 ./build.sh
-cd server && uvicorn main:app --host 0.0.0.0 --port $PORT
+uvicorn server.main:app --host 0.0.0.0 --port $PORT
+```
+
+Use this exact Render start command:
+
+```bash
+uvicorn server.main:app --host 0.0.0.0 --port $PORT
 ```
 
 Configure the following Render environment variables:
