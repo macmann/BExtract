@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
+import re
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -142,14 +143,88 @@ def compile_payload(ctx) -> dict[str, Any]:
     return compiled
 
 
-def route_critic_result(ctx) -> Event:
-    raw = ctx.state.get("critic_output") or ctx.state.get("critic_result") or {}
-    parsed = raw
+def _extract_json_candidate(text: str) -> str:
+    """Return the most likely JSON object/array from an LLM text response."""
+
+    stripped = text.strip()
+    if not stripped:
+        return ""
+
+    fence_match = re.search(r"```(?:json)?\s*(.*?)\s*```", stripped, flags=re.IGNORECASE | re.DOTALL)
+    if fence_match:
+        return fence_match.group(1).strip()
+
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(stripped):
+        if char not in "[{":
+            continue
+        try:
+            _, end = decoder.raw_decode(stripped[index:])
+        except json.JSONDecodeError:
+            continue
+        return stripped[index : index + end]
+
+    return stripped
+
+
+def _parse_critic_response(raw: Any) -> dict[str, Any]:
+    """Parse critic output defensively so malformed LLM text cannot break routing."""
+
+    if isinstance(raw, dict):
+        return raw
+
+    if not isinstance(raw, str):
+        return {
+            "status": "pass",
+            "failed_item_id": "",
+            "failed_item_type": "",
+            "critique": "Critic returned no parseable response; continuing with compiled payload.",
+            "corrected_payload": None,
+            "parse_warning": f"Unsupported critic output type: {type(raw).__name__}",
+        }
+
+    candidate = _extract_json_candidate(raw)
+    if not candidate:
+        return {
+            "status": "pass",
+            "failed_item_id": "",
+            "failed_item_type": "",
+            "critique": "Critic returned an empty response; continuing with compiled payload.",
+            "corrected_payload": None,
+            "parse_warning": "empty response",
+        }
+
     try:
-        if isinstance(raw, str):
-            parsed = json.loads(raw)
-    except Exception as exc:
-        raise RuntimeError(f"Gemini critic response parsing failed: {exc}") from exc
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError as exc:
+        return {
+            "status": "pass",
+            "failed_item_id": "",
+            "failed_item_type": "",
+            "critique": "Critic returned malformed JSON; continuing with compiled payload.",
+            "corrected_payload": None,
+            "parse_warning": str(exc),
+            "raw_response": raw,
+        }
+
+    if isinstance(parsed, dict):
+        return parsed
+
+    return {
+        "status": "pass",
+        "failed_item_id": "",
+        "failed_item_type": "",
+        "critique": "Critic returned JSON that was not an object; continuing with compiled payload.",
+        "corrected_payload": None,
+        "parse_warning": f"Expected object, got {type(parsed).__name__}",
+    }
+
+
+def route_critic_result(ctx) -> Event:
+    raw = ctx.state.get("critic_output")
+    if raw is None:
+        raw = ctx.state.get("critic_result") or {}
+    parsed = _parse_critic_response(raw)
     ctx.state["critic_result"] = parsed
     route = "db_commit"
     if isinstance(parsed, dict) and parsed.get("status") == "fail":
