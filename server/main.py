@@ -254,6 +254,19 @@ class _TeeLogCapture(io.StringIO):
         self._stream.flush()
         super().flush()
 
+    def fileno(self) -> int:
+        """Expose the wrapped terminal file descriptor for subprocess users.
+
+        Prisma's Python client starts a query-engine subprocess. On Windows,
+        ``subprocess.Popen`` asks the currently redirected stdout/stderr for a
+        real OS file descriptor; ``io.StringIO`` does not provide one, which
+        raises ``io.UnsupportedOperation: fileno``. Delegating to the original
+        server stream keeps log capture active without breaking subprocess
+        startup.
+        """
+
+        return self._stream.fileno()
+
 
 async def _extract_stream(upload: UploadFile, template_payload: dict[str, Any]) -> AsyncIterator[str]:
     backend_log_lines: list[str] = []
