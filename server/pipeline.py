@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 from google.adk import Workflow
@@ -149,27 +151,51 @@ def route_critic_result(ctx) -> Event:
     return Event(output=parsed, actions=EventActions(route=route))
 
 
+async def save_extraction_results(template_id: str, results: dict[str, Any]) -> dict[str, Any]:
+    """Insert the final validated JSON payload into Prisma's ExtractionResult table."""
+
+    if importlib.util.find_spec("prisma") is None:
+        return {"status": "ready", "backend": "memory", "payload": results}
+
+    prisma_module = importlib.import_module("prisma")
+    client = prisma_module.Prisma()
+    await client.connect()
+    try:
+        record = await client.extractionresult.create(
+            data={
+                "documentId": str(results.get("document_id") or results.get("documentId") or template_id or "uploaded_document"),
+                "fileName": str(results.get("file_name") or results.get("fileName") or "uploaded.pdf"),
+                "rawText": results.get("raw_text") or results.get("rawText"),
+                "data": results,
+                "confidence": results.get("confidence") if isinstance(results.get("confidence"), (int, float)) else None,
+                "status": str(results.get("status") or "validated"),
+                "templateId": template_id or None,
+            }
+        )
+        return {"status": "committed", "backend": "prisma", "record_id": getattr(record, "id", None)}
+    finally:
+        await client.disconnect()
+
+
 async def db_commit_node(ctx) -> dict[str, Any]:
-    """Persist the final validated extraction payload with Prisma or SQLAlchemy."""
+    """Persist the final validated extraction payload with Prisma."""
 
     payload = ctx.state.get("compiled_payload", {})
     if isinstance(ctx.state.get("critic_result"), dict) and ctx.state["critic_result"].get("corrected_payload"):
         payload = ctx.state["critic_result"]["corrected_payload"]
 
-    serialized = json.dumps(payload, default=str)
-    if importlib.util.find_spec("prisma") is not None:
-        prisma_module = importlib.import_module("prisma")
-        client = prisma_module.Prisma()
-        await client.connect()
-        record = await client.extractionjob.create(data={"payload": serialized})
-        await client.disconnect()
-        return {"status": "committed", "backend": "prisma", "record": str(record)}
+    template = payload.get("template", {}) if isinstance(payload, dict) else {}
+    template_id = str(template.get("id") or template.get("template_id") or "") if isinstance(template, dict) else ""
+    return await save_extraction_results(template_id, payload if isinstance(payload, dict) else {"data": payload})
 
-    if importlib.util.find_spec("sqlalchemy") is not None:
-        return {"status": "ready", "backend": "sqlalchemy", "payload": payload}
 
-    return {"status": "ready", "backend": "memory", "payload": payload}
 
+async def workflow_progress(template_payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+    """Yield progress events while the dynamic extraction workflow is prepared."""
+
+    for index, item in enumerate(_template_items(template_payload), start=1):
+        item_name = str(item.get("name") or item.get("id") or item.get("key") or f"Item {index}")
+        yield {"status": f"Processing {item_name}", "item": item_name, "index": index}
 
 def build_dynamic_graph(template_payload: dict) -> Workflow:
     """Build a Google ADK workflow graph from the UI extraction template."""

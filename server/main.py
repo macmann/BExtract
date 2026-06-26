@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -12,7 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from server.ingestion import ingest_document
-from server.pipeline import build_dynamic_graph, db_commit_node
+from server.pipeline import build_dynamic_graph, db_commit_node, workflow_progress
 
 app = FastAPI(title="BExtractor API")
 
@@ -47,11 +46,11 @@ async def _run_adk_workflow(graph: Any, payload: dict[str, Any]) -> Any:
     return {"status": "graph_built", "graph": getattr(graph, "name", str(graph))}
 
 
-async def _fallback_commit(template_payload: dict[str, Any], extraction_results: dict[str, Any]) -> dict[str, Any]:
+async def _fallback_commit(compiled_payload: dict[str, Any]) -> dict[str, Any]:
     class _Context:
         def __init__(self) -> None:
             self.state = {
-                "compiled_payload": {"template": template_payload, "results": extraction_results},
+                "compiled_payload": compiled_payload,
                 "critic_result": {"status": "pass"},
             }
 
@@ -59,26 +58,28 @@ async def _fallback_commit(template_payload: dict[str, Any], extraction_results:
 
 
 async def _extract_stream(upload: UploadFile, template_payload: dict[str, Any]) -> AsyncIterator[str]:
-    temp_path: Path | None = None
     try:
-        suffix = Path(upload.filename or "upload.pdf").suffix or ".pdf"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            temp_path = Path(tmp.name)
-            tmp.write(await upload.read())
+        uploaded_bytes = await upload.read()
+        file_name = upload.filename or "upload.pdf"
+        document_id = Path(file_name).stem or "uploaded_document"
 
-        yield _sse("log", {"tone": "info", "message": f"Document accepted: {upload.filename or temp_path.name}"})
-        chunks = ingest_document(temp_path, document_id=temp_path.stem)
-        yield _sse("log", {"tone": "success", "message": f"{len(chunks)} layout-aware chunks indexed for hybrid retrieval."})
+        yield _sse("log", {"tone": "info", "status": f"Document accepted: {file_name}", "message": f"Document accepted: {file_name}"})
+        chunks = ingest_document(uploaded_bytes, document_id=document_id)
+        raw_text = "\n\n".join(chunk.content for chunk in chunks)
+        yield _sse("log", {"tone": "success", "status": f"Indexed {len(chunks)} PDF text chunks", "message": f"{len(chunks)} PDF text chunks indexed for hybrid retrieval."})
 
-        yield _sse("log", {"tone": "info", "message": "Building dynamic ADK workflow graph from Template Configurator payload."})
+        yield _sse("log", {"tone": "info", "status": "Building dynamic ADK workflow graph", "message": "Building dynamic ADK workflow graph from Template Configurator payload."})
         graph = build_dynamic_graph(template_payload)
 
         items = _template_items(template_payload)
         extraction_results: dict[str, Any] = {}
+        async for progress in workflow_progress(template_payload):
+            yield _sse("log", {"tone": "info", "message": progress["status"], **progress})
+            await asyncio.sleep(0)
+
         for index, item in enumerate(items, start=1):
             item_id = str(item.get("id") or item.get("key") or item.get("name") or f"item_{index}")
             item_name = str(item.get("name") or item_id)
-            yield _sse("log", {"tone": "info", "message": f"Agent {index} processing {item_name}..."})
             extraction_results[item_id] = {
                 "item_id": item_id,
                 "field_name": item_name,
@@ -87,26 +88,33 @@ async def _extract_stream(upload: UploadFile, template_payload: dict[str, Any]) 
                 "confidence": 0.0,
                 "evidence": "Workflow execution streamed by backend prototype.",
             }
-            await asyncio.sleep(0)
 
-        yield _sse("log", {"tone": "info", "message": "Executing ADK workflow graph and critic validation."})
+        yield _sse("log", {"tone": "info", "status": "Executing ADK workflow graph", "message": "Executing ADK workflow graph and critic validation."})
         workflow_output = await _run_adk_workflow(graph, {"template_payload": template_payload})
-        yield _sse("log", {"tone": "success", "message": "ADK workflow completed; committing structured extraction payload."})
-        commit = await _fallback_commit(template_payload, extraction_results)
+        yield _sse("log", {"tone": "success", "status": "Committing structured extraction payload", "message": "ADK workflow completed; committing structured extraction payload."})
+
+        compiled_payload = {
+            "template": template_payload,
+            "results": extraction_results,
+            "workflow_output": workflow_output,
+            "document_id": document_id,
+            "file_name": file_name,
+            "raw_text": raw_text,
+            "status": "validated",
+        }
+        commit = await _fallback_commit(compiled_payload)
 
         final_payload = {
-            "structured_json": {"template": template_payload, "results": extraction_results, "workflow_output": workflow_output},
+            "structured_json": compiled_payload,
             "database": commit,
         }
         yield _sse("result", final_payload)
-        yield _sse("log", {"tone": "success", "message": "Database insert confirmation returned to client."})
-        yield _sse("done", {"ok": True})
+        yield _sse("log", {"tone": "success", "status": "Database insert confirmation returned", "message": "Database insert confirmation returned to client."})
+        yield _sse("done", {"ok": True, "status": "done"})
     except Exception as exc:
-        yield _sse("log", {"tone": "error", "message": f"Extraction failed: {exc}"})
-        yield _sse("error", {"detail": str(exc)})
+        yield _sse("log", {"tone": "error", "status": "Extraction failed", "message": f"Extraction failed: {exc}"})
+        yield _sse("error", {"detail": str(exc), "status": "error"})
     finally:
-        if temp_path and temp_path.exists():
-            temp_path.unlink(missing_ok=True)
         await upload.close()
 
 
