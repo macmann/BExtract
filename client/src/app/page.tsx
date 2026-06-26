@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
 import {
   AlertTriangle,
@@ -63,6 +63,12 @@ type TokenCostMetrics = {
   total_cost: number;
 };
 
+type DebugRunMetrics = {
+  runId: string;
+  chunkCount: number | null;
+  elapsedSeconds: number | null;
+};
+
 const initialFields: FieldCard[] = [
   {
     id: 1,
@@ -99,6 +105,12 @@ const initialLogs: RuntimeLog[] = [
 ];
 
 const initialResults: ExtractionResult[] = [];
+
+const initialDebugRunMetrics: DebugRunMetrics = {
+  runId: "Not started",
+  chunkCount: null,
+  elapsedSeconds: null,
+};
 
 function UploadDropzone({
   files,
@@ -711,13 +723,17 @@ export default function Home() {
     BatchExportRecord[]
   >([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [showDebugPanel, setShowDebugPanel] = useState(false);
+  const [showDebugPanel, setShowDebugPanel] = useState(true);
   const [templateName, setTemplateName] = useState("BExtractor Template");
   const [extractionApproach, setExtractionApproach] =
     useState<ExtractionApproach>("pre_injected");
   const [tokenCostMetrics, setTokenCostMetrics] =
     useState<TokenCostMetrics | null>(null);
   const [backendLogText, setBackendLogText] = useState("");
+  const [debugRunMetrics, setDebugRunMetrics] = useState<DebugRunMetrics>(
+    initialDebugRunMetrics,
+  );
+  const runStartedAtRef = useRef<number | null>(null);
   const [isCostMetricsOpen, setIsCostMetricsOpen] = useState(false);
   const addField = () =>
     setFields((current) => [
@@ -737,6 +753,24 @@ export default function Home() {
 
   const timestamp = () =>
     new Date().toLocaleTimeString("en-US", { hour12: false });
+
+  const updateDebugRunMetrics = (updates: Partial<DebugRunMetrics>) =>
+    setDebugRunMetrics((current) => ({ ...current, ...updates }));
+
+  const updateElapsedSeconds = () => {
+    if (!runStartedAtRef.current) return;
+    updateDebugRunMetrics({
+      elapsedSeconds: (Date.now() - runStartedAtRef.current) / 1000,
+    });
+  };
+
+  const captureChunkCountFromMessage = (message: string) => {
+    const chunkMatch = message.match(/(?:Parsed|Indexed)\s+(\d+)\s+PDF text chunks/i);
+    if (chunkMatch) {
+      updateDebugRunMetrics({ chunkCount: Number(chunkMatch[1]) });
+    }
+  };
+
   const appendLog = (tone: RuntimeLog["tone"], text: string) =>
     setRuntimeLogs((current) => [
       ...current,
@@ -857,25 +891,29 @@ export default function Home() {
 
     if (errorMessage) {
       appendLog("error", errorMessage);
+      updateElapsedSeconds();
       abortControllerRef.current = null;
       setIsLoading(false);
       return;
     }
 
     if (normalizedEvent === "debug_log" && typeof data.message === "string") {
+      captureChunkCountFromMessage(data.message);
       setDebugLogText(
         (current) => `${current}${current ? "\n" : ""}${data.message}`,
       );
       return;
     }
 
-    if (message)
+    if (message) {
+      captureChunkCountFromMessage(message);
       appendLog(
         coerceTone(
           data.tone ?? (normalizedEvent === "error" ? "error" : undefined),
         ),
         message,
       );
+    }
 
     const batchProgress =
       data.batch_progress && typeof data.batch_progress === "object"
@@ -896,6 +934,7 @@ export default function Home() {
       if (records.length > 0) setBatchExportRecords(records);
       const metrics = normalizeTokenCostMetrics(data.token_cost_metrics);
       if (metrics) setTokenCostMetrics(metrics);
+      updateElapsedSeconds();
       appendLog(
         "success",
         message || "Extraction completed successfully for all files.",
@@ -916,7 +955,11 @@ export default function Home() {
       if (results.length > 0) setExtractionResults(results);
       const metrics = normalizeTokenCostMetrics(data.token_cost_metrics);
       if (metrics) setTokenCostMetrics(metrics);
+      updateDebugRunMetrics({
+        runId: String(data.batch_id ?? data.document_id ?? debugRunMetrics.runId),
+      });
       if (typeof data.backend_log_text === "string") {
+        captureChunkCountFromMessage(data.backend_log_text);
         setBackendLogText(data.backend_log_text);
         setDebugLogText(data.backend_log_text);
       }
@@ -931,6 +974,7 @@ export default function Home() {
         return;
       }
 
+      updateElapsedSeconds();
       appendLog(
         "success",
         batchTotal > 1
@@ -1104,6 +1148,8 @@ export default function Home() {
     setTokenCostMetrics(null);
     setBackendLogText("");
     setDebugLogText("");
+    setDebugRunMetrics(initialDebugRunMetrics);
+    runStartedAtRef.current = null;
     setIsCostMetricsOpen(false);
     setRuntimeLogs([
       {
@@ -1119,6 +1165,7 @@ export default function Home() {
 
   const handleCancelExtraction = () => {
     abortControllerRef.current?.abort();
+    updateElapsedSeconds();
     setIsLoading(false);
   };
 
@@ -1150,6 +1197,12 @@ export default function Home() {
       files.length === 1
         ? files[0].name.replace(/\.pdf$/i, "") || "uploaded_document"
         : `${safeTemplateName()}_batch`;
+    runStartedAtRef.current = Date.now();
+    setDebugRunMetrics({
+      runId: documentId,
+      chunkCount: null,
+      elapsedSeconds: null,
+    });
     const templatePayload = {
       documentId,
       items: fieldPayload,
@@ -1210,6 +1263,31 @@ export default function Home() {
       setIsLoading(false);
     }
   };
+
+  const debugSummaryMetrics = useMemo(
+    () => [
+      { label: "Run", value: debugRunMetrics.runId, icon: Play },
+      {
+        label: "Chunks",
+        value:
+          debugRunMetrics.chunkCount === null
+            ? "Pending"
+            : String(debugRunMetrics.chunkCount),
+        icon: DatabaseZap,
+      },
+      {
+        label: "SLA",
+        value:
+          debugRunMetrics.elapsedSeconds === null
+            ? isLoading
+              ? "Running"
+              : "Pending"
+            : `${debugRunMetrics.elapsedSeconds.toFixed(1)}s`,
+        icon: Gauge,
+      },
+    ],
+    [debugRunMetrics, isLoading],
+  );
 
   return (
     <main className="min-h-screen bg-[#060913] text-slate-100">
@@ -1346,11 +1424,7 @@ export default function Home() {
         {showDebugPanel && (
           <aside className="hidden w-[40%] bg-[linear-gradient(180deg,#0b1020,#05070d)] p-5 xl:block">
             <div className="mb-5 grid grid-cols-3 gap-3">
-              {[
-                { label: "Run", value: "ADK-2049", icon: Play },
-                { label: "Chunks", value: "018", icon: DatabaseZap },
-                { label: "SLA", value: "1.8s", icon: Gauge },
-              ].map((metric) => {
+              {debugSummaryMetrics.map((metric) => {
                 const Icon = metric.icon;
 
                 return (
