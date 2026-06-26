@@ -12,15 +12,18 @@ import {
   DatabaseZap,
   Download,
   FileJson,
+  FolderOpen,
   Gauge,
   Layers3,
   Play,
   Plus,
+  Save,
   RefreshCw,
   Search,
   ShieldCheck,
   Settings2,
   TerminalSquare,
+  Trash2,
   UploadCloud,
   X,
 } from "lucide-react";
@@ -68,6 +71,16 @@ type DebugRunMetrics = {
   chunkCount: number | null;
   elapsedSeconds: number | null;
 };
+
+type SavedTemplate = {
+  id: string;
+  name: string;
+  fields: FieldCard[];
+  extractionApproach: ExtractionApproach;
+  updatedAt: string;
+};
+
+const TEMPLATE_STORAGE_KEY = "bextract.savedTemplates";
 
 const initialFields: FieldCard[] = [
   {
@@ -711,6 +724,115 @@ function ResultsPanel({
   );
 }
 
+
+function TemplateDrawer({
+  templates,
+  activeTemplateId,
+  templateName,
+  onTemplateNameChange,
+  onSaveTemplate,
+  onLoadTemplate,
+  onDeleteTemplate,
+  onRunTemplate,
+  isLoading,
+}: {
+  templates: SavedTemplate[];
+  activeTemplateId: string | null;
+  templateName: string;
+  onTemplateNameChange: (name: string) => void;
+  onSaveTemplate: () => void;
+  onLoadTemplate: (template: SavedTemplate) => void;
+  onDeleteTemplate: (templateId: string) => void;
+  onRunTemplate: (template: SavedTemplate) => void;
+  isLoading: boolean;
+}) {
+  return (
+    <aside className="w-72 shrink-0 border-r border-cyan-300/10 bg-[linear-gradient(180deg,#070b14,#03050a)] p-4">
+      <div className="sticky top-4 space-y-4">
+        <div>
+          <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.24em] text-cyan-300">
+            <FolderOpen className="h-4 w-4" /> Templates
+          </p>
+          <p className="mt-2 text-xs leading-5 text-slate-500">
+            Save extraction field cards, select a template, then run it against the uploaded PDF set.
+          </p>
+        </div>
+
+        <div className="rounded-2xl border border-slate-700/80 bg-slate-950/70 p-3 shadow-inner shadow-black/30">
+          <label className="space-y-1.5">
+            <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-400">
+              Template Name
+            </span>
+            <input
+              value={templateName}
+              onChange={(event) => onTemplateNameChange(event.target.value)}
+              className="terminal-input"
+              placeholder="Template name"
+            />
+          </label>
+          <button
+            onClick={onSaveTemplate}
+            className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-cyan-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-cyan-200"
+          >
+            <Save className="h-4 w-4" /> Save Template
+          </button>
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">
+              Saved Templates
+            </p>
+            <span className="rounded-full bg-slate-800 px-2 py-1 text-[10px] font-bold text-slate-400">
+              {templates.length}
+            </span>
+          </div>
+          {templates.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-slate-700 bg-slate-900/40 p-4 text-xs leading-5 text-slate-500">
+              No saved templates yet. Configure fields and click Save Template.
+            </div>
+          ) : (
+            templates.map((template) => (
+              <article
+                key={template.id}
+                className={`rounded-2xl border p-3 transition ${activeTemplateId === template.id ? "border-cyan-300/60 bg-cyan-300/10" : "border-slate-800 bg-slate-900/60 hover:border-slate-600"}`}
+              >
+                <button
+                  onClick={() => onLoadTemplate(template)}
+                  className="block w-full text-left"
+                >
+                  <p className="truncate text-sm font-bold text-slate-100">
+                    {template.name}
+                  </p>
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    {template.fields.length} fields · {template.extractionApproach === "pre_injected" ? "Pre-Injected" : "Agentic"}
+                  </p>
+                </button>
+                <div className="mt-3 grid grid-cols-[1fr_auto] gap-2">
+                  <button
+                    onClick={() => onRunTemplate(template)}
+                    disabled={isLoading}
+                    className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-300 px-3 py-2 text-[10px] font-black uppercase tracking-[0.16em] text-slate-950 hover:bg-emerald-200 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <Play className="h-3.5 w-3.5" /> Run
+                  </button>
+                  <button
+                    onClick={() => onDeleteTemplate(template.id)}
+                    className="rounded-lg border border-red-300/30 bg-red-400/10 p-2 text-red-200 hover:border-red-200 hover:bg-red-400/20"
+                    aria-label={`Delete ${template.name}`}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
+              </article>
+            ))
+          )}
+        </div>
+      </div>
+    </aside>
+  );
+}
+
 export default function Home() {
   const [fields, setFields] = useState(initialFields);
   const [files, setFiles] = useState<File[]>([]);
@@ -725,6 +847,28 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [showDebugPanel, setShowDebugPanel] = useState(true);
   const [templateName, setTemplateName] = useState("BExtractor Template");
+  const [savedTemplates, setSavedTemplates] = useState<SavedTemplate[]>(() => {
+    if (typeof window === "undefined") return [];
+
+    try {
+      const storedTemplates = window.localStorage.getItem(TEMPLATE_STORAGE_KEY);
+      if (!storedTemplates) return [];
+
+      const parsedTemplates = JSON.parse(storedTemplates) as SavedTemplate[];
+      if (!Array.isArray(parsedTemplates)) return [];
+
+      return parsedTemplates.filter(
+        (template) =>
+          template &&
+          typeof template.id === "string" &&
+          typeof template.name === "string" &&
+          Array.isArray(template.fields),
+      );
+    } catch {
+      return [];
+    }
+  });
+  const [activeTemplateId, setActiveTemplateId] = useState<string | null>(null);
   const [extractionApproach, setExtractionApproach] =
     useState<ExtractionApproach>("pre_injected");
   const [tokenCostMetrics, setTokenCostMetrics] =
@@ -735,6 +879,14 @@ export default function Home() {
   );
   const runStartedAtRef = useRef<number | null>(null);
   const [isCostMetricsOpen, setIsCostMetricsOpen] = useState(false);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      TEMPLATE_STORAGE_KEY,
+      JSON.stringify(savedTemplates),
+    );
+  }, [savedTemplates]);
+
   const addField = () =>
     setFields((current) => [
       ...current,
@@ -776,6 +928,45 @@ export default function Home() {
       ...current,
       { time: timestamp(), tone, text },
     ]);
+
+  const applyTemplate = (template: SavedTemplate) => {
+    setActiveTemplateId(template.id);
+    setTemplateName(template.name);
+    setFields(template.fields.map((field) => ({ ...field })));
+    setExtractionApproach(template.extractionApproach);
+    setExtractionResults([]);
+    setBatchExportRecords([]);
+    setTokenCostMetrics(null);
+    setBackendLogText("");
+    setDebugLogText("");
+  };
+
+  const handleSaveTemplate = () => {
+    const normalizedName = safeTemplateName();
+    const templateId = activeTemplateId ?? crypto.randomUUID();
+    const template: SavedTemplate = {
+      id: templateId,
+      name: normalizedName,
+      fields: fields.map((field) => ({ ...field })),
+      extractionApproach,
+      updatedAt: new Date().toISOString(),
+    };
+
+    setSavedTemplates((current) => {
+      const existingIndex = current.findIndex((item) => item.id === templateId);
+      if (existingIndex === -1) return [template, ...current];
+      return current.map((item) => (item.id === templateId ? template : item));
+    });
+    setActiveTemplateId(templateId);
+    setTemplateName(normalizedName);
+    appendLog("success", `Saved template "${normalizedName}".`);
+  };
+
+  const handleDeleteTemplate = (templateId: string) => {
+    setSavedTemplates((current) => current.filter((template) => template.id !== templateId));
+    if (activeTemplateId === templateId) setActiveTemplateId(null);
+    appendLog("warn", "Template deleted from this browser.");
+  };
 
   const coerceTone = (tone: unknown): RuntimeLog["tone"] => {
     if (tone === "success" || tone === "warn" || tone === "error") return tone;
@@ -1169,7 +1360,7 @@ export default function Home() {
     setIsLoading(false);
   };
 
-  const handleRunExtraction = async () => {
+  const handleRunExtraction = async (templateOverride?: SavedTemplate) => {
     if (isLoading) return;
 
     if (files.length === 0) {
@@ -1186,7 +1377,11 @@ export default function Home() {
     setBackendLogText("");
     setIsCostMetricsOpen(false);
 
-    const fieldPayload = fields.map((field) => ({
+    const runFields = templateOverride?.fields ?? fields;
+    const runTemplateName = templateOverride?.name ?? safeTemplateName();
+    const runApproach = templateOverride?.extractionApproach ?? extractionApproach;
+
+    const fieldPayload = runFields.map((field) => ({
       id: String(field.id),
       name: field.name,
       definition: field.definition,
@@ -1196,7 +1391,7 @@ export default function Home() {
     const documentId =
       files.length === 1
         ? files[0].name.replace(/\.pdf$/i, "") || "uploaded_document"
-        : `${safeTemplateName()}_batch`;
+        : `${runTemplateName}_batch`;
     runStartedAtRef.current = Date.now();
     setDebugRunMetrics({
       runId: documentId,
@@ -1206,7 +1401,7 @@ export default function Home() {
     const templatePayload = {
       documentId,
       items: fieldPayload,
-      extractionApproach,
+      extractionApproach: runApproach,
     };
     const formData = new FormData();
     files.forEach((selectedFile) => {
@@ -1218,7 +1413,7 @@ export default function Home() {
     try {
       appendLog(
         "info",
-        `Uploading ${files.length} PDF${files.length === 1 ? "" : "s"} with ${fields.length} field card${fields.length === 1 ? "" : "s"}.`,
+        `Uploading ${files.length} PDF${files.length === 1 ? "" : "s"} with ${runFields.length} field card${runFields.length === 1 ? "" : "s"}.`,
       );
       const controller = new AbortController();
       abortControllerRef.current = controller;
@@ -1264,6 +1459,12 @@ export default function Home() {
     }
   };
 
+
+  const handleRunSavedTemplate = (template: SavedTemplate) => {
+    applyTemplate(template);
+    void handleRunExtraction(template);
+  };
+
   const debugSummaryMetrics = useMemo(
     () => [
       { label: "Run", value: debugRunMetrics.runId, icon: Play },
@@ -1298,6 +1499,20 @@ export default function Home() {
         />
       )}
       <div className="flex min-h-screen">
+        <TemplateDrawer
+          templates={savedTemplates}
+          activeTemplateId={activeTemplateId}
+          templateName={templateName}
+          onTemplateNameChange={(name) => {
+            setTemplateName(name);
+            setActiveTemplateId(null);
+          }}
+          onSaveTemplate={handleSaveTemplate}
+          onLoadTemplate={applyTemplate}
+          onDeleteTemplate={handleDeleteTemplate}
+          onRunTemplate={handleRunSavedTemplate}
+          isLoading={isLoading}
+        />
         <section
           className={`${showDebugPanel ? "w-full xl:w-[60%] xl:border-r" : "w-full"} border-cyan-300/10 bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.14),transparent_32%),linear-gradient(180deg,#0f172a,#070b14)] p-5 transition-all duration-500`}
         >
@@ -1335,7 +1550,7 @@ export default function Home() {
                 ))}
               </fieldset>
               <button
-                onClick={handleRunExtraction}
+                onClick={() => handleRunExtraction()}
                 disabled={isLoading}
                 className="inline-flex items-center gap-2 rounded-xl bg-emerald-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-emerald-200 disabled:cursor-not-allowed disabled:opacity-60"
               >
@@ -1352,18 +1567,14 @@ export default function Home() {
               </button>
             </div>
           </header>
-          <div className="mb-4 grid gap-3 rounded-2xl border border-slate-700/70 bg-slate-950/50 p-4 lg:grid-cols-[1fr_auto] lg:items-end">
-            <label className="space-y-1.5">
+          <div className="mb-4 grid gap-3 rounded-2xl border border-slate-700/70 bg-slate-950/50 p-4 lg:grid-cols-[1fr_auto] lg:items-center">
+            <div>
               <span className="text-xs font-bold uppercase tracking-[0.22em] text-slate-400">
-                Template Name
+                Active Template
               </span>
-              <input
-                value={templateName}
-                onChange={(event) => setTemplateName(event.target.value)}
-                className="terminal-input"
-                placeholder="Name used in CSV/JSON exports"
-              />
-            </label>
+              <p className="mt-1 text-lg font-black text-slate-50">{safeTemplateName()}</p>
+              <p className="text-xs text-slate-500">Use the left drawer to save, select, delete, or run reusable templates.</p>
+            </div>
             <label className="inline-flex cursor-pointer items-center gap-3 rounded-xl border border-slate-700 bg-slate-900/70 px-4 py-3 text-sm font-semibold text-slate-200">
               <input
                 type="checkbox"
