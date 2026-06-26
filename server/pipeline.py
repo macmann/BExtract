@@ -16,7 +16,6 @@ from google.adk.events import Event
 from google.adk.events.event_actions import EventActions
 from google.adk.workflow import FunctionNode
 from google import genai
-from google.genai import types
 
 from server.custom_tools import document_hybrid_search, search_tool
 
@@ -340,6 +339,33 @@ def _parse_result_payload(raw: Any) -> Any:
         text = "".join(getattr(part, "text", "") or "" for part in raw.parts)
         return _parse_result_payload(text)
     return raw
+
+
+def _parse_pre_injected_response(raw_response: str) -> dict[str, Any]:
+    """Parse the stateless Gemini extraction response into a result dictionary.
+
+    Gemini JSON mode should produce a bare JSON object, but this remains
+    defensive for older responses that may include markdown fences or malformed
+    content.
+    """
+
+    match = re.search(r"```(?:json)?\s*(\{.*\}|\[.*\])\s*```", raw_response, re.IGNORECASE | re.DOTALL)
+    cleaned = match.group(1) if match else raw_response.strip()
+
+    try:
+        parsed_data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        return {"value": None, "confidence": 0.0, "evidence": raw_response}
+
+    if isinstance(parsed_data, dict):
+        return parsed_data
+
+    return {
+        "value": parsed_data,
+        "confidence": 0.0,
+        "evidence": raw_response,
+        "critique_response": "Model response JSON was not an object; parsed value preserved.",
+    }
 
 
 def normalize_workflow_results(template_payload: dict[str, Any], workflow_output: Any) -> dict[str, Any]:
@@ -722,10 +748,11 @@ async def run_pre_injected_extraction(
 
         chunks = await document_hybrid_search(item_name, definition)
         prompt = _pre_injected_prompt(item, item_id, item_name, chunks)
+        generation_config = {"response_mime_type": "application/json"}
         response = await client.aio.models.generate_content(
             model=model,
             contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json"),
+            config=generation_config,
         )
         response_payload = response.model_dump(mode="json") if hasattr(response, "model_dump") else response
         events.append({"node_name": f"pre_injected_{item_id}", "response": response_payload})
@@ -745,25 +772,15 @@ async def run_pre_injected_extraction(
         )
 
         raw_text = getattr(response, "text", "") or ""
-        parsed = _parse_result_payload(raw_text)
-        if not isinstance(parsed, dict):
-            parsed = {
-                "item_id": item_id,
-                "field_name": item_name,
-                "value": parsed,
-                "unit": item.get("dataType", "String"),
-                "confidence": 0.0,
-                "evidence": chunks,
-                "critique_response": "Model response was not a JSON object; raw value preserved.",
-            }
+        parsed = _parse_pre_injected_response(raw_text)
         extraction_results[item_id] = {
-            "item_id": str(_case_insensitive_get(parsed, "item_id", "item id", default=item_id)),
-            "field_name": str(_case_insensitive_get(parsed, "field_name", "field name", "table_name", "table name", default=item_name)),
-            "value": _case_insensitive_get(parsed, "value", "rows", "data", "answer", default=""),
-            "unit": _case_insensitive_get(parsed, "unit", "data_type", "data type", default=item.get("dataType", "String")),
-            "confidence": _case_insensitive_get(parsed, "confidence", "score", default=0.0),
-            "evidence": _case_insensitive_get(parsed, "evidence", "source", "citation", default=chunks),
-            "critique_response": _case_insensitive_get(parsed, "critique_response", "critique response", default=""),
+            "item_id": item_id,
+            "field_name": item_name,
+            "value": parsed.get("value"),
+            "unit": parsed.get("unit"),
+            "confidence": parsed.get("confidence", 0.0),
+            "evidence": parsed.get("evidence", ""),
+            "critique_response": parsed.get("critique_response", ""),
         }
 
     token_cost_metrics = _metrics_from_usage_entries(usage_entries)
