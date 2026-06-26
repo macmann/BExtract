@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
 import {
   AlertTriangle,
@@ -80,7 +80,10 @@ const initialFields: FieldCard[] = [
   },
 ];
 
-const extractionApproachOptions: { value: ExtractionApproach; label: string }[] = [
+const extractionApproachOptions: {
+  value: ExtractionApproach;
+  label: string;
+}[] = [
   { value: "pre_injected", label: "Pre-Injected RAG (Fast/Cheap)" },
   { value: "agentic", label: "Agentic RAG (Deep Reasoning)" },
 ];
@@ -93,34 +96,14 @@ const initialLogs: RuntimeLog[] = [
   },
 ];
 
-const initialResults: ExtractionResult[] = [
-  {
-    field: "Total Commitment",
-    value: "$42,000,000",
-    confidence: "99.2%",
-    status: "validated",
-  },
-  {
-    field: "Effective Date",
-    value: "2026-04-01",
-    confidence: "96.8%",
-    status: "validated",
-  },
-  {
-    field: "Net Asset Value",
-    value: "$18,720,419",
-    confidence: "71.4%",
-    status: "alert",
-    alert: "Math validation failed: subtotal + accruals mismatch by $12,080.",
-  },
-];
+const initialResults: ExtractionResult[] = [];
 
 function UploadDropzone({
-  file,
-  onFileChange,
+  files,
+  onFilesChange,
 }: {
-  file: File | null;
-  onFileChange: (file: File | null) => void;
+  files: File[];
+  onFilesChange: (files: File[]) => void;
 }) {
   return (
     <div className="group relative overflow-hidden rounded-2xl border border-dashed border-cyan-400/40 bg-cyan-400/[0.03] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] transition hover:border-cyan-300/70 hover:bg-cyan-400/[0.06]">
@@ -134,9 +117,9 @@ function UploadDropzone({
             Upload Document
           </p>
           <p className="mt-1 text-xs text-slate-400">
-            {file
-              ? file.name
-              : "Drop or browse for a PDF. OCR and chunking start when you run extraction."}
+            {files.length > 0
+              ? files.map((selectedFile) => selectedFile.name).join(", ")
+              : "Drop or browse for one or more PDFs. OCR and chunking start when you run extraction."}
           </p>
         </div>
         <label className="cursor-pointer rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-200 shadow-sm transition hover:border-cyan-300 hover:text-cyan-100">
@@ -145,48 +128,14 @@ function UploadDropzone({
             className="sr-only"
             type="file"
             accept="application/pdf,.pdf"
+            multiple
             onChange={(event: ChangeEvent<HTMLInputElement>) =>
-              onFileChange(event.target.files?.[0] ?? null)
+              onFilesChange(Array.from(event.target.files ?? []))
             }
           />
         </label>
       </div>
     </div>
-  );
-}
-
-function PdfPreview({ file }: { file: File | null }) {
-  const previewUrl = useMemo(
-    () => (file ? URL.createObjectURL(file) : null),
-    [file],
-  );
-
-  useEffect(() => {
-    return () => {
-      if (previewUrl) {
-        URL.revokeObjectURL(previewUrl);
-      }
-    };
-  }, [previewUrl]);
-
-  if (!previewUrl) return null;
-
-  return (
-    <section className="mt-4 rounded-2xl border border-slate-700/80 bg-slate-950/70 p-4 shadow-2xl shadow-black/20">
-      <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-xs font-black uppercase tracking-[0.22em] text-cyan-100">
-          PDF Preview
-        </h2>
-        <span className="max-w-[50%] truncate text-xs text-slate-400">
-          {file?.name}
-        </span>
-      </div>
-      <iframe
-        src={previewUrl}
-        title={`PDF preview for ${file?.name ?? "uploaded document"}`}
-        className="h-[560px] w-full rounded-xl border border-slate-800 bg-slate-900"
-      />
-    </section>
   );
 }
 
@@ -450,9 +399,7 @@ function LogsPanel({
           {isLoading ? "Live" : "Idle"}
         </span>
       </div>
-      <div
-        className="min-h-0 flex-1 space-y-2 overflow-y-auto p-4 font-mono text-xs"
-      >
+      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-4 font-mono text-xs">
         {logs.map((log, index) => {
           const isActive = isLoading && index === logs.length - 1;
 
@@ -752,7 +699,7 @@ function ResultsPanel({
 
 export default function Home() {
   const [fields, setFields] = useState(initialFields);
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
   const [runtimeLogs, setRuntimeLogs] = useState<RuntimeLog[]>(initialLogs);
   const [debugLogText, setDebugLogText] = useState("");
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -978,7 +925,7 @@ export default function Home() {
   const safeTemplateName = () =>
     (
       templateName.trim() ||
-      file?.name.replace(/\.pdf$/i, "") ||
+      files[0]?.name.replace(/\.pdf$/i, "") ||
       "bextract-output"
     ).trim();
 
@@ -1074,9 +1021,9 @@ export default function Home() {
     );
   };
 
-  const handleFileChange = (nextFile: File | null) => {
+  const handleFilesChange = (nextFiles: File[]) => {
     abortControllerRef.current?.abort();
-    setFile(nextFile);
+    setFiles(nextFiles);
     setIsLoading(false);
     setExtractionResults([]);
     setTokenCostMetrics(null);
@@ -1086,10 +1033,11 @@ export default function Home() {
     setRuntimeLogs([
       {
         time: timestamp(),
-        tone: nextFile ? "info" : "warn",
-        text: nextFile
-          ? `Selected ${nextFile.name}. Run extraction to generate fresh results.`
-          : "PDF selection cleared. Upload a PDF before starting extraction.",
+        tone: nextFiles.length > 0 ? "info" : "warn",
+        text:
+          nextFiles.length > 0
+            ? `Selected ${nextFiles.length} PDF${nextFiles.length === 1 ? "" : "s"}: ${nextFiles.map((selectedFile) => selectedFile.name).join(", ")}. Run extraction to generate fresh results.`
+            : "PDF selection cleared. Upload at least one PDF before starting extraction.",
       },
     ]);
   };
@@ -1102,8 +1050,8 @@ export default function Home() {
   const handleRunExtraction = async () => {
     if (isLoading) return;
 
-    if (!file) {
-      appendLog("warn", "Select a PDF before starting extraction.");
+    if (files.length === 0) {
+      appendLog("warn", "Select at least one PDF before starting extraction.");
       return;
     }
 
@@ -1122,21 +1070,26 @@ export default function Home() {
       routeType: field.routeType,
       dataType: field.dataType,
     }));
-    const documentId = file.name.replace(/\.pdf$/i, "") || "uploaded_document";
+    const documentId =
+      files.length === 1
+        ? files[0].name.replace(/\.pdf$/i, "") || "uploaded_document"
+        : `${safeTemplateName()}_batch`;
     const templatePayload = {
       documentId,
       items: fieldPayload,
       extractionApproach,
     };
     const formData = new FormData();
-    formData.append("file", file, file.name);
+    files.forEach((selectedFile) => {
+      formData.append("files", selectedFile, selectedFile.name);
+    });
     formData.append("fields", JSON.stringify(fieldPayload));
     formData.append("payload", JSON.stringify(templatePayload));
 
     try {
       appendLog(
         "info",
-        `Uploading ${file.name} with ${fields.length} field card${fields.length === 1 ? "" : "s"}.`,
+        `Uploading ${files.length} PDF${files.length === 1 ? "" : "s"} with ${fields.length} field card${fields.length === 1 ? "" : "s"}.`,
       );
       const controller = new AbortController();
       abortControllerRef.current = controller;
@@ -1268,7 +1221,7 @@ export default function Home() {
               Enable debugging panel
             </label>
           </div>
-          <UploadDropzone file={file} onFileChange={handleFileChange} />
+          <UploadDropzone files={files} onFilesChange={handleFilesChange} />
           <ExtractionLoadingPanel
             logs={runtimeLogs}
             isLoading={isLoading}
@@ -1295,7 +1248,9 @@ export default function Home() {
               />
             ))}
           </div>
-          {!showDebugPanel && (
+          {(extractionResults.length > 0 ||
+            tokenCostMetrics ||
+            backendLogText) && (
             <div
               className={`mx-auto max-w-6xl transition-all duration-700 ${isLoading ? "translate-y-2 opacity-0" : "translate-y-0 opacity-100"}`}
             >
@@ -1310,7 +1265,6 @@ export default function Home() {
               />
             </div>
           )}
-          <PdfPreview file={file} />
         </section>
 
         {showDebugPanel && (
@@ -1351,19 +1305,7 @@ export default function Home() {
               </div>
             </div>
             <DebugLogsPanel text={debugLogText} isLoading={isLoading} />
-            <div
-              className={`transition-all duration-700 ${isLoading ? "translate-y-2 opacity-0" : "translate-y-0 opacity-100"}`}
-            >
-              <ResultsPanel
-                results={extractionResults}
-                tokenCostMetrics={tokenCostMetrics}
-                hasBackendLogs={Boolean(backendLogText)}
-                onViewCostMetrics={() => setIsCostMetricsOpen(true)}
-                onDownload={handleDownloadOutput}
-                onDownloadLogs={handleDownloadLogs}
-                onSendToMcp={handleSendToMcp}
-              />
-            </div>
+
             <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-950/80 p-4 text-xs text-slate-400">
               <ClipboardList className="mb-2 h-4 w-4 text-cyan-300" /> Audit
               trail sealed with immutable run metadata. Source citations remain
