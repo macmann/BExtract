@@ -144,6 +144,98 @@ def log_token_cost_metrics(metrics: dict[str, Any]) -> None:
     print("======================================")
 
 
+
+def _node_name_from_event(event_payload: Any) -> str:
+    """Best-effort extraction of the ADK node/agent name from a runner event."""
+
+    payload = event_payload.model_dump(mode="json") if hasattr(event_payload, "model_dump") else event_payload
+    if not isinstance(payload, dict):
+        return type(event_payload).__name__
+
+    for key in ("node_name", "nodeName", "node_id", "nodeId", "author", "name", "id"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+
+    actions = payload.get("actions")
+    if isinstance(actions, dict):
+        for key in ("node_name", "nodeName", "route"):
+            value = actions.get(key)
+            if value:
+                return str(value)
+
+    return "unknown_adk_node"
+
+
+def _event_usage_tokens(event_payload: Any) -> tuple[int, int]:
+    """Return total prompt/candidate token counts found on one ADK event."""
+
+    usage_entries = _iter_usage_metadata(event_payload)
+    return (
+        sum(input_count for input_count, _ in usage_entries),
+        sum(output_count for _, output_count in usage_entries),
+    )
+
+
+def _estimated_context_length(step_input_payload: Any) -> int:
+    """Return a stable debug estimate for the payload/context visible to a step."""
+
+    try:
+        return len(str(step_input_payload))
+    except Exception:
+        return 0
+
+
+def _node_cost(input_tokens: int, output_tokens: int) -> float:
+    """Calculate per-node estimated cost using configured model rates."""
+
+    return (input_tokens / 1_000_000) * INPUT_RATE_PER_MILLION + (output_tokens / 1_000_000) * OUTPUT_RATE_PER_MILLION
+
+
+def record_node_token_audit(
+    node_audit_summary: list[dict[str, Any]],
+    event_payload: Any,
+    step_input_payload: Any,
+) -> dict[str, Any]:
+    """Append and print a granular token trace for a single ADK runner event/node turn."""
+
+    node_name = _node_name_from_event(event_payload)
+    input_tokens, output_tokens = _event_usage_tokens(event_payload)
+    context_length = _estimated_context_length(step_input_payload)
+    audit_entry = {
+        "node_name": node_name,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "dynamic_context_length": context_length,
+        "estimated_cost": _node_cost(input_tokens, output_tokens),
+    }
+    node_audit_summary.append(audit_entry)
+
+    print(f"--- ADK NODE TRACE: {node_name} ---")
+    print(f"* Step Input Tokens:  {input_tokens:,}")
+    print(f"* Step Output Tokens: {output_tokens:,}")
+    print(f"* Step Dynamic Context Length (Estimated characters/keys): {context_length}")
+    print("----------------------------------")
+
+    return audit_entry
+
+
+def log_graph_token_audit_ledger(node_audit_summary: list[dict[str, Any]]) -> None:
+    """Print an aggregated ledger of every audited ADK graph node turn."""
+
+    print("===========================================================")
+    print("BEXTRACT GRAPH TOKEN AUDIT LEDGER")
+    print("===========================================================")
+    print("Node Name           | Input Tokens | Output Tokens | Est. Cost")
+    print("-----------------------------------------------------------")
+    for entry in node_audit_summary:
+        node_name = str(entry.get("node_name", "unknown_adk_node"))
+        input_tokens = int(entry.get("input_tokens", 0) or 0)
+        output_tokens = int(entry.get("output_tokens", 0) or 0)
+        estimated_cost = float(entry.get("estimated_cost", _node_cost(input_tokens, output_tokens)) or 0.0)
+        print(f"{node_name[:19]:<19} | {input_tokens:>12,} | {output_tokens:>13,} | ${estimated_cost:.4f}")
+    print("===========================================================")
+
 def _normalize_match_key(value: Any) -> str:
     """Return a casing/spacing-insensitive key for matching template and LLM fields."""
 
