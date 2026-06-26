@@ -8,7 +8,7 @@ import google.generativeai as genai
 from google.adk.tools import FunctionTool
 from rank_bm25 import BM25Okapi
 
-from server.ingestion import EMBEDDING_MODEL, configure_google_embeddings, tokenize, vector_literal
+from server.ingestion import EMBEDDING_DIMENSION, EMBEDDING_MODEL, configure_google_embeddings, tokenize, vector_literal
 
 
 async def _fetch_dense_matches(query_embedding: list[float]) -> list[dict[str, object]]:
@@ -20,10 +20,10 @@ async def _fetch_dense_matches(query_embedding: list[float]) -> list[dict[str, o
     await client.connect()
     try:
         rows = await client.query_raw(
-            '''
-            SELECT "id", "chunk_text", "metadata", "embedding" <=> $1::vector AS distance
+            f'''
+            SELECT "id", "chunk_text", "metadata", "embedding" <=> $1::vector({EMBEDDING_DIMENSION}) AS distance
             FROM "DocumentChunk"
-            ORDER BY "embedding" <=> $1::vector
+            ORDER BY "embedding" <=> $1::vector({EMBEDDING_DIMENSION})
             LIMIT 10
             ''',
             vector_literal(query_embedding),
