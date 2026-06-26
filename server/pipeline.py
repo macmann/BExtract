@@ -250,7 +250,7 @@ def flatten_extraction_results_for_export(
 
     return row_record
 
-def log_token_cost_metrics(metrics: dict[str, Any]) -> None:
+def log_token_cost_metrics(metrics: dict[str, Any], title: str = "BEXTRACT TOKEN & COST METRICS") -> None:
     """Print a structured terminal block for extraction token usage and cost."""
 
     input_tokens = int(metrics.get("input_tokens", 0) or 0)
@@ -260,7 +260,7 @@ def log_token_cost_metrics(metrics: dict[str, Any]) -> None:
     output_cost = float(metrics.get("output_cost", 0.0) or 0.0)
     total_cost = float(metrics.get("total_cost", input_cost + output_cost) or 0.0)
 
-    print("=== BEXTRACT TOKEN & COST METRICS ===")
+    print(f"=== {title} ===")
     print(f"[Input]   Tokens: {input_tokens:,} | Cost: ${input_cost:.4f}")
     print(f"[Output]  Tokens: {output_tokens:,} | Cost: ${output_cost:.4f}")
     print("--------------------------------------")
@@ -799,6 +799,7 @@ async def run_pre_injected_extraction(
     template: dict[str, Any],
     *,
     model: str = "gemini-3.5-flash",
+    log_final_metrics: bool = True,
 ) -> AsyncIterator[dict[str, Any] | str]:
     """Run stateless per-field RAG extraction without ADK Runner orchestration."""
 
@@ -853,8 +854,9 @@ async def run_pre_injected_extraction(
         }
 
     token_cost_metrics = _metrics_from_usage_entries(usage_entries)
-    log_token_cost_metrics(token_cost_metrics)
-    log_graph_token_audit_ledger(node_audit_summary)
+    if log_final_metrics:
+        log_token_cost_metrics(token_cost_metrics)
+        log_graph_token_audit_ledger(node_audit_summary)
     yield {
         "results": extraction_results,
         "workflow_output": {
