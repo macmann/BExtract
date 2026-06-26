@@ -500,6 +500,13 @@ def _parse_critic_response(raw: Any) -> dict[str, Any]:
     }
 
 
+def _retryable_item_ids(ctx) -> set[str]:
+    """Return item IDs that have retry routes in the dynamic workflow."""
+
+    template = ctx.state.get("template_payload", {}) if hasattr(ctx, "state") else {}
+    return {_item_id(item, index) for index, item in enumerate(_template_items(template), start=1)}
+
+
 def route_critic_result(ctx) -> Event:
     raw = ctx.state.get("critic_output")
     if raw is None:
@@ -509,10 +516,22 @@ def route_critic_result(ctx) -> Event:
     route = "db_commit"
     if isinstance(parsed, dict) and parsed.get("status") == "fail":
         failed_item_id = str(parsed.get("failed_item_id") or "")
-        critiques = dict(ctx.state.get("extractor_critiques", {}))
-        critiques[failed_item_id] = parsed.get("critique")
-        ctx.state["extractor_critiques"] = critiques
-        route = f"retry_{failed_item_id}"
+        retryable_ids = _retryable_item_ids(ctx)
+        if failed_item_id and failed_item_id in retryable_ids:
+            critiques = dict(ctx.state.get("extractor_critiques", {}))
+            critiques[failed_item_id] = parsed.get("critique")
+            ctx.state["extractor_critiques"] = critiques
+            route = f"retry_{failed_item_id}"
+        else:
+            parsed["route_warning"] = (
+                "Critic requested a retry for an unknown or missing item id; "
+                "committing the compiled payload instead of routing to a nonexistent workflow edge."
+            )
+            parsed["status"] = "pass"
+            print(
+                "WARNING: Critic retry route ignored because failed_item_id "
+                f"{failed_item_id!r} is not one of {sorted(retryable_ids)!r}."
+            )
     return Event(output=parsed, actions=EventActions(route=route))
 
 
