@@ -66,6 +66,30 @@ def test_normalize_workflow_results_matches_keys_case_space_and_underscore_insen
     assert normalized["rating_action"]["confidence"] == 0.93
 
 
+def test_parse_pre_injected_response_accepts_fenced_json_object():
+    from server.pipeline import _parse_pre_injected_response
+
+    parsed = _parse_pre_injected_response(
+        '```json\n{"value":"Affirmed","unit":null,"confidence":0.91,"evidence":"page 1"}\n```'
+    )
+
+    assert parsed["value"] == "Affirmed"
+    assert parsed["confidence"] == 0.91
+    assert parsed["evidence"] == "page 1"
+
+
+def test_parse_pre_injected_response_falls_back_without_preserving_raw_as_value():
+    from server.pipeline import _parse_pre_injected_response
+
+    raw_response = "The answer is probably Affirmed, but this is not JSON."
+
+    parsed = _parse_pre_injected_response(raw_response)
+
+    assert parsed["value"] is None
+    assert parsed["confidence"] == 0.0
+    assert parsed["evidence"] == raw_response
+
+
 def test_calculate_token_cost_metrics_sums_adk_event_usage_metadata():
     from server.pipeline import calculate_token_cost_metrics
 
