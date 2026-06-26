@@ -94,10 +94,10 @@ async def _document_hybrid_search(field_name: str, definition: str) -> str:
     return "\n\n".join(str(chunks_by_id[chunk_id].get("chunk_text") or "") for chunk_id in fused_chunk_ids)
 
 
-def document_hybrid_search(field_name: str, definition: str) -> str:
+async def document_hybrid_search(field_name: str, definition: str) -> str:
     """Return the top three chunks using pgvector + BM25 reciprocal rank fusion."""
 
-    return asyncio.run(_document_hybrid_search(field_name, definition))
+    return await _document_hybrid_search(field_name, definition)
 
 
 search_tool = FunctionTool(document_hybrid_search)
