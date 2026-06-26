@@ -17,6 +17,8 @@ from google.adk.workflow import FunctionNode
 
 from server.custom_tools import search_tool
 
+INPUT_RATE_PER_MILLION = 1.50
+OUTPUT_RATE_PER_MILLION = 9.00
 
 scalar_extractor = LlmAgent(
     name="scalar_extractor",
@@ -67,6 +69,79 @@ critic_agent = LlmAgent(
     output_key="critic_output",
 )
 
+
+
+def _usage_metadata_from_mapping(payload: dict[str, Any]) -> tuple[int, int] | None:
+    """Return prompt/candidate token counts from a serialized GenAI response."""
+
+    metadata = payload.get("usage_metadata") or payload.get("usageMetadata")
+    if not isinstance(metadata, dict):
+        return None
+
+    input_tokens = metadata.get("prompt_token_count", metadata.get("promptTokenCount", 0)) or 0
+    output_tokens = metadata.get("candidates_token_count", metadata.get("candidatesTokenCount", 0)) or 0
+    try:
+        return int(input_tokens), int(output_tokens)
+    except (TypeError, ValueError):
+        return 0, 0
+
+
+def _iter_usage_metadata(payload: Any) -> list[tuple[int, int]]:
+    """Recursively find usage metadata in ADK/GenAI dicts, models, and lists."""
+
+    if hasattr(payload, "model_dump"):
+        payload = payload.model_dump(mode="json")
+
+    if isinstance(payload, dict):
+        current = _usage_metadata_from_mapping(payload)
+        nested = [usage for value in payload.values() for usage in _iter_usage_metadata(value)]
+        return ([current] if current is not None else []) + nested
+
+    if isinstance(payload, list):
+        return [usage for item in payload for usage in _iter_usage_metadata(item)]
+
+    return []
+
+
+def calculate_token_cost_metrics(workflow_output: Any) -> dict[str, Any]:
+    """Calculate total token usage and cost from ADK workflow output."""
+
+    event_payload = workflow_output.get("events") if isinstance(workflow_output, dict) else None
+    usage_entries = _iter_usage_metadata(event_payload)
+    if not usage_entries:
+        usage_entries = _iter_usage_metadata(workflow_output)
+
+    input_tokens = sum(input_count for input_count, _ in usage_entries)
+    output_tokens = sum(output_count for _, output_count in usage_entries)
+    input_cost = (input_tokens / 1_000_000) * INPUT_RATE_PER_MILLION
+    output_cost = (output_tokens / 1_000_000) * OUTPUT_RATE_PER_MILLION
+
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "input_cost": input_cost,
+        "output_cost": output_cost,
+        "total_cost": input_cost + output_cost,
+    }
+
+
+def log_token_cost_metrics(metrics: dict[str, Any]) -> None:
+    """Print a structured terminal block for extraction token usage and cost."""
+
+    input_tokens = int(metrics.get("input_tokens", 0) or 0)
+    output_tokens = int(metrics.get("output_tokens", 0) or 0)
+    total_tokens = int(metrics.get("total_tokens", input_tokens + output_tokens) or 0)
+    input_cost = float(metrics.get("input_cost", 0.0) or 0.0)
+    output_cost = float(metrics.get("output_cost", 0.0) or 0.0)
+    total_cost = float(metrics.get("total_cost", input_cost + output_cost) or 0.0)
+
+    print("=== BEXTRACT TOKEN & COST METRICS ===")
+    print(f"[Input]   Tokens: {input_tokens:,} | Cost: ${input_cost:.4f}")
+    print(f"[Output]  Tokens: {output_tokens:,} | Cost: ${output_cost:.4f}")
+    print("--------------------------------------")
+    print(f"[Total]   Tokens: {total_tokens:,} | Total Cost: ${total_cost:.4f}")
+    print("======================================")
 
 
 def _normalize_match_key(value: Any) -> str:
