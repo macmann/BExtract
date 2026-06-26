@@ -66,15 +66,49 @@ def _template_items(template_payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 async def _run_adk_workflow(graph: Any, payload: dict[str, Any]) -> Any:
-    """Run the ADK workflow across common runner APIs, falling back to the graph object."""
+    """Run the ADK workflow using the ADK 2.x keyword-only node API.
+
+    ``Workflow`` inherits from ``BaseNode`` and its ``run`` method is declared as
+    ``run(*, ctx, node_input)``. Passing the template payload positionally raises
+    ``BaseNode.run() takes 1 positional argument but 2 were given``, so this
+    helper builds a minimal invocation context and consumes the async event
+    stream returned by the graph. Older runner-style APIs are still supported as
+    a fallback.
+    """
 
     try:
+        run_method = getattr(graph, "run", None)
+        if run_method is not None:
+            from google.adk.agents.context import Context
+            from google.adk.agents.invocation_context import InvocationContext
+            from google.adk.sessions import InMemorySessionService
+
+            session_service = InMemorySessionService()
+            session = session_service.create_session_sync(
+                app_name="bextract",
+                user_id="api",
+                state={},
+                session_id=f"bextract-{id(graph)}",
+            )
+            invocation_context = InvocationContext(
+                session_service=session_service,
+                invocation_id=f"bextract-{id(payload)}",
+                agent=graph,
+                session=session,
+            )
+            ctx = Context(invocation_context, node=graph, run_id=invocation_context.invocation_id)
+            events = []
+            async for event in run_method(ctx=ctx, node_input=payload):
+                events.append(event.model_dump(mode="json") if hasattr(event, "model_dump") else event)
+            state = ctx.state.to_dict() if hasattr(ctx.state, "to_dict") else dict(ctx.state)
+            return {"events": events, "state": state}
+
         for method_name in ("run_async", "arun", "execute_async"):
             method = getattr(graph, method_name, None)
             if method is not None:
                 return await method(payload)
 
-        for method_name in ("run", "execute"):
+        for method_name in ("execute",):
             method = getattr(graph, method_name, None)
             if method is not None:
                 result = method(payload)
