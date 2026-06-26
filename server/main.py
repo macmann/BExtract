@@ -136,6 +136,39 @@ async def _run_adk_workflow(graph: Any, payload: dict[str, Any]) -> Any:
         raise RuntimeError(f"Gemini workflow execution failed: {exc}") from exc
 
 
+async def _ingest_document_with_progress(
+    uploaded_bytes: bytes,
+    document_id: str,
+    remember_log,
+) -> AsyncIterator[str | list[Any]]:
+    """Run ingestion in a background task while streaming progress messages."""
+
+    progress_queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+    async def progress_callback(message: str) -> None:
+        await progress_queue.put(message)
+
+    ingestion_task = asyncio.create_task(
+        ingest_document(uploaded_bytes, document_id=document_id, progress_callback=progress_callback)
+    )
+
+    while not ingestion_task.done():
+        try:
+            message = await asyncio.wait_for(progress_queue.get(), timeout=0.5)
+        except TimeoutError:
+            yield _sse("log", {"tone": "info", "status": "Indexing PDF", "message": remember_log("Still indexing PDF chunks...")})
+            continue
+        if message is not None:
+            yield _sse("log", {"tone": "info", "status": "Indexing PDF", "message": remember_log(message)})
+
+    while not progress_queue.empty():
+        message = progress_queue.get_nowait()
+        if message is not None:
+            yield _sse("log", {"tone": "info", "status": "Indexing PDF", "message": remember_log(message)})
+
+    yield await ingestion_task
+
+
 async def _fallback_commit(compiled_payload: dict[str, Any]) -> dict[str, Any]:
     class _Context:
         def __init__(self) -> None:
@@ -235,7 +268,12 @@ async def _extract_stream(upload: UploadFile, template_payload: dict[str, Any]) 
             document_id = Path(file_name).stem or "uploaded_document"
 
             yield _sse("log", {"tone": "info", "status": f"Document accepted: {file_name}", "message": remember_log(f"Document accepted: {file_name}")})
-            chunks = await ingest_document(uploaded_bytes, document_id=document_id)
+            chunks = []
+            async for ingestion_event in _ingest_document_with_progress(uploaded_bytes, document_id, remember_log):
+                if isinstance(ingestion_event, str):
+                    yield ingestion_event
+                else:
+                    chunks = ingestion_event
             raw_text = "\n\n".join(chunk.content for chunk in chunks)
             yield _sse("log", {"tone": "success", "status": f"Indexed {len(chunks)} PDF text chunks", "message": remember_log(f"{len(chunks)} PDF text chunks indexed for hybrid retrieval.")})
 
