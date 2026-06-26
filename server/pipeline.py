@@ -414,6 +414,25 @@ def _seed_state(ctx, node_input: Any) -> dict[str, Any]:
     return {"template_payload": template}
 
 
+def _state_pop(state: Any, key: str, default: Any = None) -> Any:
+    """Return and clear a workflow state value across dict and ADK State APIs.
+
+    google.adk.sessions.state.State intentionally exposes a small mapping-like
+    API with get/set/update but no pop/delete. Function nodes still need to
+    consume temporary agent outputs without assuming a concrete dict type. For
+    plain mutable mappings, remove the key. For ADK State, read the value and
+    overwrite it with None so downstream parsing does not see stale output.
+    """
+
+    if hasattr(state, "pop"):
+        return state.pop(key, default)
+
+    value = state.get(key, default) if hasattr(state, "get") else default
+    if key in state:
+        state[key] = None
+    return value
+
+
 def _make_prepare_item(item: dict[str, Any], item_id: str):
     def prepare_item(ctx) -> dict[str, Any]:
         critique = ctx.state.get("extractor_critiques", {}).get(item_id)
@@ -428,10 +447,10 @@ def _make_prepare_item(item: dict[str, Any], item_id: str):
 def _make_collect_item(item_id: str, output_key: str):
     def collect_item(ctx) -> dict[str, Any]:
         results = dict(ctx.state.get("extraction_results", {}))
-        raw_result = ctx.state.pop(output_key, None)
+        raw_result = _state_pop(ctx.state, output_key, None)
         results[item_id] = _parse_result_payload(raw_result)
         ctx.state["extraction_results"] = results
-        ctx.state.pop("current_item", None)
+        _state_pop(ctx.state, "current_item", None)
         return {"item_id": item_id, "result": results[item_id]}
 
     collect_item.__name__ = _safe_node_name("collect", item_id)

@@ -231,6 +231,29 @@ def test_collect_item_parses_and_removes_raw_agent_output_from_state():
     assert "current_item" not in ctx.state
 
 
+def test_collect_item_handles_adk_state_without_pop():
+    from google.adk.sessions.state import State
+
+    from server.pipeline import _make_collect_item
+
+    state = State(
+        {
+            "extract_assets_output": '{"item_id":"assets","value":456}',
+            "current_item": {"item_id": "assets"},
+            "extraction_results": {},
+        },
+        {},
+    )
+    ctx = DummyContext(state)
+
+    output = _make_collect_item("assets", "extract_assets_output")(ctx)
+
+    assert output["result"]["value"] == 456
+    assert ctx.state["extraction_results"]["assets"]["value"] == 456
+    assert ctx.state["extract_assets_output"] is None
+    assert ctx.state["current_item"] is None
+
+
 def test_route_critic_result_commits_when_failed_item_id_is_unknown(capsys):
     ctx = DummyContext(
         {
