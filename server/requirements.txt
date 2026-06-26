@@ -5,3 +5,5 @@ pydantic
 uvicorn
 
 python-multipart
+PyPDF2
+prisma

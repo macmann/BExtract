@@ -1,14 +1,9 @@
-"""Layout-aware mock ingestion for BExtractor documents.
-
-This module intentionally keeps persistence in memory while modelling the two
-indexes BExtractor expects to query later: a semantic/vector-style index and a
-BM25-style lexical index. The parser is a lightweight mock that preserves table
-layouts as Markdown chunks instead of flattening them into ordinary text.
-"""
+"""PDF ingestion and in-memory hybrid retrieval indexes for BExtractor."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from io import BytesIO
 from pathlib import Path
 import math
 import re
@@ -17,7 +12,7 @@ from typing import Iterable
 
 @dataclass(frozen=True)
 class DocumentChunk:
-    """A layout-aware chunk extracted from a source document."""
+    """A text chunk extracted from a source document."""
 
     chunk_id: str
     document_id: str
@@ -35,103 +30,70 @@ MOCK_INDEX: dict[str, dict[str, object]] = {
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
 
 
-_SAMPLE_DOCUMENT = """
-BExtractor extracts insurance submission fields from uploaded documents. The
-system should preserve context around each field definition so downstream agents
-can cite the original source language.
-
-| Field | Definition | Example |
-| --- | --- | --- |
-| Named Insured | Legal entity that owns the policy | Acme LLC |
-| Effective Date | Date when coverage begins | 2026-01-01 |
-
-Tables frequently contain limits, deductibles, premium schedules, and exposure
-values. Keeping these grids intact helps retrieval return neighboring labels and
-values that would be lost during naive fixed-width chunking.
-""".strip()
-
-
 def tokenize(text: str) -> list[str]:
     """Normalize text into query/index terms."""
 
     return [token.lower() for token in _TOKEN_RE.findall(text)]
 
 
-def _read_document(document_file: str | Path) -> str:
-    path = Path(document_file)
-    if path.exists() and path.is_file():
-        return path.read_text(encoding="utf-8")
-    return _SAMPLE_DOCUMENT
+def _source_bytes(document_file: bytes | str | Path) -> bytes:
+    if isinstance(document_file, bytes):
+        return document_file
+    return Path(document_file).read_bytes()
 
 
-def _is_table_line(line: str) -> bool:
-    stripped = line.strip()
-    return stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 2
+def extract_pdf_pages(pdf_bytes: bytes) -> list[str]:
+    """Extract text from PDF bytes, returning one string per page."""
+
+    from PyPDF2 import PdfReader
+
+    reader = PdfReader(BytesIO(pdf_bytes))
+    pages: list[str] = []
+    for page in reader.pages:
+        pages.append(page.extract_text() or "")
+    return pages
 
 
-def parse_layout_chunks(document_file: str | Path, document_id: str | None = None) -> list[DocumentChunk]:
-    """Mock a layout parser that emits paragraph chunks and intact table chunks.
+def _chunk_page_text(text: str, max_tokens: int = 260, overlap: int = 40) -> list[str]:
+    """Split page text into lightweight overlapping chunks."""
 
-    Consecutive Markdown table rows are grouped into one ``table`` chunk, while
-    non-table text is split on blank lines into ``paragraph`` chunks.
-    """
-
-    source_text = _read_document(document_file)
-    doc_id = document_id or Path(document_file).stem or "mock-document"
-    chunks: list[DocumentChunk] = []
-    paragraph_lines: list[str] = []
-    table_lines: list[str] = []
-
-    def flush_paragraph() -> None:
-        if not paragraph_lines:
-            return
-        content = " ".join(line.strip() for line in paragraph_lines if line.strip())
-        if content:
-            chunks.append(
-                DocumentChunk(
-                    chunk_id=f"{doc_id}:p:{len(chunks) + 1}",
-                    document_id=doc_id,
-                    chunk_type="paragraph",
-                    content=content,
-                    metadata={"layout": "text_block"},
-                )
-            )
-        paragraph_lines.clear()
-
-    def flush_table() -> None:
-        if not table_lines:
-            return
-        chunks.append(
-            DocumentChunk(
-                chunk_id=f"{doc_id}:t:{len(chunks) + 1}",
-                document_id=doc_id,
-                chunk_type="table",
-                content="\n".join(table_lines),
-                metadata={"layout": "markdown_table"},
-            )
-        )
-        table_lines.clear()
-
-    for line in source_text.splitlines():
-        if _is_table_line(line):
-            flush_paragraph()
-            table_lines.append(line.strip())
-            continue
-        flush_table()
-        if line.strip():
-            paragraph_lines.append(line)
-        else:
-            flush_paragraph()
-
-    flush_table()
-    flush_paragraph()
+    tokens = text.split()
+    if not tokens:
+        return []
+    chunks: list[str] = []
+    step = max(max_tokens - overlap, 1)
+    for start in range(0, len(tokens), step):
+        window = tokens[start : start + max_tokens]
+        if window:
+            chunks.append(" ".join(window))
+        if start + max_tokens >= len(tokens):
+            break
     return chunks
 
 
-def ingest_document(document_file: str | Path, document_id: str | None = None) -> list[DocumentChunk]:
-    """Parse a document and register chunks in the in-memory mock indexes."""
+def parse_pdf_chunks(pdf_bytes: bytes, document_id: str) -> list[DocumentChunk]:
+    """Extract PDF text page by page and convert it into retrieval chunks."""
 
-    chunks = parse_layout_chunks(document_file, document_id=document_id)
+    chunks: list[DocumentChunk] = []
+    for page_number, page_text in enumerate(extract_pdf_pages(pdf_bytes), start=1):
+        for chunk_number, content in enumerate(_chunk_page_text(page_text), start=1):
+            chunks.append(
+                DocumentChunk(
+                    chunk_id=f"{document_id}:p{page_number}:c{chunk_number}",
+                    document_id=document_id,
+                    chunk_type="pdf_text",
+                    content=content,
+                    metadata={"page": str(page_number), "chunk": str(chunk_number)},
+                )
+            )
+    return chunks
+
+
+def ingest_document(document_file: bytes | str | Path, document_id: str | None = None) -> list[DocumentChunk]:
+    """Parse a PDF and register chunks in the in-memory hybrid indexes."""
+
+    doc_id = document_id or (Path(document_file).stem if not isinstance(document_file, bytes) else "uploaded_document")
+    chunks = parse_pdf_chunks(_source_bytes(document_file), document_id=doc_id)
     for chunk in chunks:
         terms = tokenize(chunk.content)
         term_counts = {term: terms.count(term) for term in set(terms)}
@@ -142,16 +104,16 @@ def ingest_document(document_file: str | Path, document_id: str | None = None) -
 
 
 def ensure_seed_index() -> None:
-    """Populate the mock index with a representative document if it is empty."""
+    """Leave the index empty until a real PDF is uploaded."""
 
-    if not MOCK_INDEX["chunks"]:
-        ingest_document("sample_submission.md", document_id="sample_submission")
+    return None
 
 
 def vector_score(query_terms: Iterable[str], chunk_id: str) -> float:
     """Compute a small cosine-over-token-counts score for semantic simulation."""
 
-    query_counts = {term: list(query_terms).count(term) for term in set(query_terms)}
+    terms = list(query_terms)
+    query_counts = {term: terms.count(term) for term in set(terms)}
     chunk_counts = MOCK_INDEX["vector_index"].get(chunk_id, {})
     if not query_counts or not chunk_counts:
         return 0.0
