@@ -106,3 +106,46 @@ def test_log_token_cost_metrics_prints_formatted_block(capsys):
     assert "[Input]   Tokens: 1,234 | Cost: $0.0019" in captured
     assert "[Output]  Tokens: 56 | Cost: $0.0005" in captured
     assert "[Total]   Tokens: 1,290 | Total Cost: $0.0024" in captured
+
+
+def test_record_node_token_audit_appends_and_prints_trace(capsys):
+    from server.pipeline import record_node_token_audit
+
+    summary = []
+    event = {
+        "author": "Example_Extractor",
+        "content": {"usage_metadata": {"prompt_token_count": 24500, "candidates_token_count": 350}},
+    }
+
+    entry = record_node_token_audit(summary, event, {"field": "value"})
+
+    assert entry["node_name"] == "Example_Extractor"
+    assert entry["input_tokens"] == 24500
+    assert entry["output_tokens"] == 350
+    assert summary == [entry]
+    captured = capsys.readouterr().out
+    assert "--- ADK NODE TRACE: Example_Extractor ---" in captured
+    assert "* Step Input Tokens:  24,500" in captured
+    assert "* Step Output Tokens: 350" in captured
+
+
+def test_log_graph_token_audit_ledger_prints_rows(capsys):
+    from server.pipeline import log_graph_token_audit_ledger
+
+    log_graph_token_audit_ledger(
+        [
+            {
+                "node_name": "Example_Critic",
+                "input_tokens": 24850,
+                "output_tokens": 120,
+                "estimated_cost": 0.038355,
+            }
+        ]
+    )
+
+    captured = capsys.readouterr().out
+    assert "BEXTRACT GRAPH TOKEN AUDIT LEDGER" in captured
+    assert "Example_Critic" in captured
+    assert "24,850" in captured
+    assert "120" in captured
+    assert "$0.0384" in captured

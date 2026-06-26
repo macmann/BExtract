@@ -19,8 +19,10 @@ from server.pipeline import (
     build_dynamic_graph,
     calculate_token_cost_metrics,
     db_commit_node,
+    log_graph_token_audit_ledger,
     log_token_cost_metrics,
     normalize_workflow_results,
+    record_node_token_audit,
     workflow_progress,
 )
 
@@ -100,13 +102,18 @@ async def _run_adk_workflow(graph: Any, payload: dict[str, Any]) -> Any:
 
     try:
         events = []
+        node_audit_summary: list[dict[str, Any]] = []
         async for event in runner.run_async(
             user_id=user_id,
             session_id=session_id,
             new_message=new_message,
             state_delta=payload,
         ):
-            events.append(event.model_dump(mode="json") if hasattr(event, "model_dump") else event)
+            event_payload = event.model_dump(mode="json") if hasattr(event, "model_dump") else event
+            events.append(event_payload)
+            record_node_token_audit(node_audit_summary, event_payload, payload)
+
+        log_graph_token_audit_ledger(node_audit_summary)
 
         session = await session_service.get_session(
             app_name=app_name,
@@ -117,7 +124,7 @@ async def _run_adk_workflow(graph: Any, payload: dict[str, Any]) -> Any:
         if session is not None and getattr(session, "state", None) is not None:
             session_state = session.state
             state = session_state.to_dict() if hasattr(session_state, "to_dict") else dict(session_state)
-        response = {"events": events, "state": state}
+        response = {"events": events, "state": state, "node_audit_summary": node_audit_summary}
         print("=== DEBUG FINAL WORKFLOW OUTPUT ===")
         print(f"Type of output: {type(response)}")
         print(f"Content of output: {repr(response)}")
@@ -193,6 +200,7 @@ async def _extract_stream(upload: UploadFile, template_payload: dict[str, Any]) 
             "structured_json": compiled_payload,
             "database": commit,
             "token_cost_metrics": token_cost_metrics,
+            "node_audit_summary": workflow_output.get("node_audit_summary", []) if isinstance(workflow_output, dict) else [],
         }
         yield _sse("result", final_payload)
         yield _sse("log", {"tone": "success", "status": "Database insert confirmation returned", "message": "Database insert confirmation returned to client."})
