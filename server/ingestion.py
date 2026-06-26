@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
@@ -26,6 +28,8 @@ class DocumentChunk:
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
 EMBEDDING_MODEL = "models/gemini-embedding-001"
 EMBEDDING_DIMENSION = 3072
+EMBEDDING_TIMEOUT_SECONDS = int(os.getenv("BEXTRACT_EMBEDDING_TIMEOUT_SECONDS", "60"))
+ProgressCallback = Callable[[str], Awaitable[None]]
 
 
 def tokenize(text: str) -> list[str]:
@@ -129,11 +133,19 @@ async def ensure_extraction_result_record(client, extraction_id: str, *, file_na
     )
 
 
-async def persist_document_chunks(chunks: list[DocumentChunk]) -> None:
+async def persist_document_chunks(
+    chunks: list[DocumentChunk],
+    progress_callback: ProgressCallback | None = None,
+) -> None:
     """Persist parsed chunks and dense vectors into Neon PostgreSQL via Prisma raw SQL."""
 
     if not chunks:
         return
+
+    async def report(message: str) -> None:
+        print(message, flush=True)
+        if progress_callback is not None:
+            await progress_callback(message)
 
     from prisma import Prisma
 
@@ -144,8 +156,19 @@ async def persist_document_chunks(chunks: list[DocumentChunk]) -> None:
         for extraction_id in extraction_ids:
             await ensure_extraction_result_record(client, extraction_id)
 
-        for chunk in chunks:
-            embedding = generate_embedding(chunk.content)
+        total_chunks = len(chunks)
+        for index, chunk in enumerate(chunks, start=1):
+            await report(f"Embedding PDF chunk {index}/{total_chunks} ({chunk.chunk_id}).")
+            try:
+                embedding = await asyncio.wait_for(
+                    asyncio.to_thread(generate_embedding, chunk.content),
+                    timeout=EMBEDDING_TIMEOUT_SECONDS,
+                )
+            except TimeoutError as exc:
+                raise RuntimeError(
+                    f"Timed out after {EMBEDDING_TIMEOUT_SECONDS}s while generating embedding "
+                    f"for PDF chunk {index}/{total_chunks} ({chunk.chunk_id})."
+                ) from exc
             await client.execute_raw(
                 f'''
                 INSERT INTO "DocumentChunk" ("id", "extraction_id", "chunk_text", "embedding", "metadata")
@@ -165,12 +188,23 @@ async def persist_document_chunks(chunks: list[DocumentChunk]) -> None:
         await client.disconnect()
 
 
-async def ingest_document(document_file: bytes | str | Path, document_id: str | None = None) -> list[DocumentChunk]:
+async def ingest_document(
+    document_file: bytes | str | Path,
+    document_id: str | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> list[DocumentChunk]:
     """Parse a PDF, generate dense embeddings, and store chunks in pgvector."""
 
+    async def report(message: str) -> None:
+        print(message, flush=True)
+        if progress_callback is not None:
+            await progress_callback(message)
+
     doc_id = document_id or (Path(document_file).stem if not isinstance(document_file, bytes) else "uploaded_document")
+    await report(f"Parsing PDF text for document {doc_id}.")
     chunks = parse_pdf_chunks(_source_bytes(document_file), document_id=doc_id)
-    await persist_document_chunks(chunks)
+    await report(f"Parsed {len(chunks)} PDF text chunks for document {doc_id}.")
+    await persist_document_chunks(chunks, progress_callback=progress_callback)
     return chunks
 
 
