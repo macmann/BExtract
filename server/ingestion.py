@@ -1,13 +1,15 @@
-"""PDF ingestion and in-memory hybrid retrieval indexes for BExtractor."""
+"""PDF ingestion and Neon/pgvector-backed retrieval storage for BExtractor."""
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
-import math
 import re
-from typing import Iterable
+
+import google.generativeai as genai
 
 
 @dataclass(frozen=True)
@@ -21,13 +23,8 @@ class DocumentChunk:
     metadata: dict[str, str] = field(default_factory=dict)
 
 
-MOCK_INDEX: dict[str, dict[str, object]] = {
-    "chunks": {},
-    "vector_index": {},
-    "bm25_index": {},
-}
-
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
+EMBEDDING_MODEL = "models/text-embedding-004"
 
 
 def tokenize(text: str) -> list[str]:
@@ -89,56 +86,71 @@ def parse_pdf_chunks(pdf_bytes: bytes, document_id: str) -> list[DocumentChunk]:
     return chunks
 
 
-def ingest_document(document_file: bytes | str | Path, document_id: str | None = None) -> list[DocumentChunk]:
-    """Parse a PDF and register chunks in the in-memory hybrid indexes."""
+def configure_google_embeddings() -> None:
+    """Configure the Google Generative AI client when an API key is available."""
+
+    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    if api_key:
+        genai.configure(api_key=api_key)
+
+
+def generate_embedding(text: str) -> list[float]:
+    """Generate a 768-dimensional embedding with Google's text-embedding-004 model."""
+
+    configure_google_embeddings()
+    response = genai.embed_content(model=EMBEDDING_MODEL, content=text, task_type="retrieval_document")
+    embedding = response["embedding"] if isinstance(response, dict) else response.embedding
+    return [float(value) for value in embedding]
+
+
+def vector_literal(embedding: list[float]) -> str:
+    """Serialize an embedding for pgvector's vector input syntax."""
+
+    return "[" + ",".join(str(value) for value in embedding) + "]"
+
+
+async def persist_document_chunks(chunks: list[DocumentChunk]) -> None:
+    """Persist parsed chunks and dense vectors into Neon PostgreSQL via Prisma raw SQL."""
+
+    if not chunks:
+        return
+
+    from prisma import Prisma
+
+    client = Prisma()
+    await client.connect()
+    try:
+        for chunk in chunks:
+            embedding = generate_embedding(chunk.content)
+            await client.execute_raw(
+                '''
+                INSERT INTO "DocumentChunk" ("id", "extraction_id", "chunk_text", "embedding", "metadata")
+                VALUES ($1, $2, $3, $4::vector, $5::jsonb)
+                ON CONFLICT ("id") DO UPDATE SET
+                    "chunk_text" = EXCLUDED."chunk_text",
+                    "embedding" = EXCLUDED."embedding",
+                    "metadata" = EXCLUDED."metadata"
+                ''',
+                chunk.chunk_id,
+                chunk.document_id,
+                chunk.content,
+                vector_literal(embedding),
+                json.dumps({"chunk_type": chunk.chunk_type, **chunk.metadata}),
+            )
+    finally:
+        await client.disconnect()
+
+
+async def ingest_document(document_file: bytes | str | Path, document_id: str | None = None) -> list[DocumentChunk]:
+    """Parse a PDF, generate dense embeddings, and store chunks in pgvector."""
 
     doc_id = document_id or (Path(document_file).stem if not isinstance(document_file, bytes) else "uploaded_document")
     chunks = parse_pdf_chunks(_source_bytes(document_file), document_id=doc_id)
-    for chunk in chunks:
-        terms = tokenize(chunk.content)
-        term_counts = {term: terms.count(term) for term in set(terms)}
-        MOCK_INDEX["chunks"][chunk.chunk_id] = chunk
-        MOCK_INDEX["vector_index"][chunk.chunk_id] = term_counts
-        MOCK_INDEX["bm25_index"][chunk.chunk_id] = terms
+    await persist_document_chunks(chunks)
     return chunks
 
 
 def ensure_seed_index() -> None:
-    """Leave the index empty until a real PDF is uploaded."""
+    """Compatibility hook retained for existing tool initialization paths."""
 
     return None
-
-
-def vector_score(query_terms: Iterable[str], chunk_id: str) -> float:
-    """Compute a small cosine-over-token-counts score for semantic simulation."""
-
-    terms = list(query_terms)
-    query_counts = {term: terms.count(term) for term in set(terms)}
-    chunk_counts = MOCK_INDEX["vector_index"].get(chunk_id, {})
-    if not query_counts or not chunk_counts:
-        return 0.0
-    dot = sum(query_counts.get(term, 0) * chunk_counts.get(term, 0) for term in query_counts)
-    query_norm = math.sqrt(sum(value * value for value in query_counts.values()))
-    chunk_norm = math.sqrt(sum(value * value for value in chunk_counts.values()))
-    return dot / (query_norm * chunk_norm) if query_norm and chunk_norm else 0.0
-
-
-def bm25_score(query_terms: Iterable[str], chunk_id: str) -> float:
-    """Compute a lightweight BM25-like lexical score over the in-memory corpus."""
-
-    terms = list(query_terms)
-    document_terms = MOCK_INDEX["bm25_index"].get(chunk_id, [])
-    if not terms or not document_terms:
-        return 0.0
-
-    corpus_terms = MOCK_INDEX["bm25_index"]
-    corpus_size = max(len(corpus_terms), 1)
-    score = 0.0
-    for term in set(terms):
-        frequency = document_terms.count(term)
-        if frequency == 0:
-            continue
-        documents_with_term = sum(1 for indexed_terms in corpus_terms.values() if term in indexed_terms)
-        idf = math.log(1 + (corpus_size - documents_with_term + 0.5) / (documents_with_term + 0.5))
-        score += idf * frequency / (frequency + 1.2)
-    return score
