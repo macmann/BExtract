@@ -144,24 +144,78 @@ async def _fallback_commit(compiled_payload: dict[str, Any]) -> dict[str, Any]:
     return await db_commit_node(_Context())
 
 
+def _format_backend_log_export(
+    runtime_log_lines: list[str],
+    token_cost_metrics: dict[str, Any] | None,
+    node_audit_summary: list[dict[str, Any]],
+) -> str:
+    """Build a plain-text troubleshooting log that mirrors backend terminal diagnostics."""
+
+    sections = ["BEXTRACT BACKEND TROUBLESHOOTING LOG", "", "Runtime events:"]
+    sections.extend(runtime_log_lines or ["No runtime events were captured."])
+
+    if token_cost_metrics:
+        input_tokens = int(token_cost_metrics.get("input_tokens", 0) or 0)
+        output_tokens = int(token_cost_metrics.get("output_tokens", 0) or 0)
+        total_tokens = int(token_cost_metrics.get("total_tokens", input_tokens + output_tokens) or 0)
+        input_cost = float(token_cost_metrics.get("input_cost", 0.0) or 0.0)
+        output_cost = float(token_cost_metrics.get("output_cost", 0.0) or 0.0)
+        total_cost = float(token_cost_metrics.get("total_cost", input_cost + output_cost) or 0.0)
+        sections.extend([
+            "",
+            "=== BEXTRACT TOKEN & COST METRICS ===",
+            f"[Input]   Tokens: {input_tokens:,} | Cost: ${input_cost:.4f}",
+            f"[Output]  Tokens: {output_tokens:,} | Cost: ${output_cost:.4f}",
+            "--------------------------------------",
+            f"[Total]   Tokens: {total_tokens:,} | Total Cost: ${total_cost:.4f}",
+            "======================================",
+        ])
+
+    sections.extend([
+        "",
+        "===========================================================",
+        "BEXTRACT GRAPH TOKEN AUDIT LEDGER",
+        "===========================================================",
+        "Node Name           | Input Tokens | Output Tokens | Est. Cost",
+        "-----------------------------------------------------------",
+    ])
+    if node_audit_summary:
+        for entry in node_audit_summary:
+            node_name = str(entry.get("node_name", "unknown_adk_node"))
+            input_tokens = int(entry.get("input_tokens", 0) or 0)
+            output_tokens = int(entry.get("output_tokens", 0) or 0)
+            estimated_cost = float(entry.get("estimated_cost", 0.0) or 0.0)
+            sections.append(f"{node_name[:19]:<19} | {input_tokens:>12,} | {output_tokens:>13,} | ${estimated_cost:.4f}")
+    else:
+        sections.append("No ADK node audit rows were captured.")
+    sections.append("===========================================================")
+    return "\n".join(sections)
+
+
 async def _extract_stream(upload: UploadFile, template_payload: dict[str, Any]) -> AsyncIterator[str]:
+    backend_log_lines: list[str] = []
+
+    def remember_log(message: str) -> str:
+        backend_log_lines.append(message)
+        return message
+
     try:
         uploaded_bytes = await upload.read()
         file_name = upload.filename or "upload.pdf"
         document_id = Path(file_name).stem or "uploaded_document"
 
-        yield _sse("log", {"tone": "info", "status": f"Document accepted: {file_name}", "message": f"Document accepted: {file_name}"})
+        yield _sse("log", {"tone": "info", "status": f"Document accepted: {file_name}", "message": remember_log(f"Document accepted: {file_name}")})
         chunks = await ingest_document(uploaded_bytes, document_id=document_id)
         raw_text = "\n\n".join(chunk.content for chunk in chunks)
-        yield _sse("log", {"tone": "success", "status": f"Indexed {len(chunks)} PDF text chunks", "message": f"{len(chunks)} PDF text chunks indexed for hybrid retrieval."})
+        yield _sse("log", {"tone": "success", "status": f"Indexed {len(chunks)} PDF text chunks", "message": remember_log(f"{len(chunks)} PDF text chunks indexed for hybrid retrieval.")})
 
-        yield _sse("log", {"tone": "info", "status": "Building dynamic ADK workflow graph", "message": "Building dynamic ADK workflow graph from Template Configurator payload."})
+        yield _sse("log", {"tone": "info", "status": "Building dynamic ADK workflow graph", "message": remember_log("Building dynamic ADK workflow graph from Template Configurator payload.")})
         graph = build_dynamic_graph(template_payload)
 
         items = _template_items(template_payload)
         extraction_results: dict[str, Any] = {}
         async for progress in workflow_progress(template_payload):
-            yield _sse("log", {"tone": "info", "message": progress["status"], **progress})
+            yield _sse("log", {"tone": "info", "message": remember_log(str(progress["status"])), **progress})
             await asyncio.sleep(0)
 
         for index, item in enumerate(items, start=1):
@@ -176,12 +230,12 @@ async def _extract_stream(upload: UploadFile, template_payload: dict[str, Any]) 
                 "evidence": "Workflow execution streamed by backend prototype.",
             }
 
-        yield _sse("log", {"tone": "info", "status": "Executing ADK workflow graph", "message": "Executing ADK workflow graph and critic validation."})
+        yield _sse("log", {"tone": "info", "status": "Executing ADK workflow graph", "message": remember_log("Executing ADK workflow graph and critic validation.")})
         workflow_output = await _run_adk_workflow(graph, {"template_payload": template_payload})
         normalized_results = normalize_workflow_results(template_payload, workflow_output)
         if normalized_results:
             extraction_results.update(normalized_results)
-        yield _sse("log", {"tone": "success", "status": "Committing structured extraction payload", "message": "ADK workflow completed; committing structured extraction payload."})
+        yield _sse("log", {"tone": "success", "status": "Committing structured extraction payload", "message": remember_log("ADK workflow completed; committing structured extraction payload.")})
 
         compiled_payload = {
             "template": template_payload,
@@ -196,11 +250,15 @@ async def _extract_stream(upload: UploadFile, template_payload: dict[str, Any]) 
         token_cost_metrics = calculate_token_cost_metrics(workflow_output)
         log_token_cost_metrics(token_cost_metrics)
 
+        node_audit_summary = workflow_output.get("node_audit_summary", []) if isinstance(workflow_output, dict) else []
+        remember_log("Database insert confirmation returned to client.")
         final_payload = {
             "structured_json": compiled_payload,
             "database": commit,
             "token_cost_metrics": token_cost_metrics,
-            "node_audit_summary": workflow_output.get("node_audit_summary", []) if isinstance(workflow_output, dict) else [],
+            "node_audit_summary": node_audit_summary,
+            "backend_log_text": _format_backend_log_export(backend_log_lines, token_cost_metrics, node_audit_summary),
+            "backend_log_lines": backend_log_lines,
         }
         yield _sse("result", final_payload)
         yield _sse("log", {"tone": "success", "status": "Database insert confirmation returned", "message": "Database insert confirmation returned to client."})
