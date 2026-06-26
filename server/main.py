@@ -158,6 +158,7 @@ async def _ingest_document_with_progress(
     uploaded_bytes: bytes,
     document_id: str,
     remember_log,
+    status_formatter=lambda status: status,
 ) -> AsyncIterator[str | list[Any]]:
     """Run ingestion in a background task while streaming progress messages."""
 
@@ -174,15 +175,15 @@ async def _ingest_document_with_progress(
         try:
             message = await asyncio.wait_for(progress_queue.get(), timeout=0.5)
         except TimeoutError:
-            yield _sse("log", {"tone": "info", "status": "Indexing PDF", "message": remember_log("Still indexing PDF chunks...")})
+            yield _sse("log", {"tone": "info", "status": status_formatter("Indexing PDF"), "message": remember_log("Still indexing PDF chunks...")})
             continue
         if message is not None:
-            yield _sse("log", {"tone": "info", "status": "Indexing PDF", "message": remember_log(message)})
+            yield _sse("log", {"tone": "info", "status": status_formatter("Indexing PDF"), "message": remember_log(message)})
 
     while not progress_queue.empty():
         message = progress_queue.get_nowait()
         if message is not None:
-            yield _sse("log", {"tone": "info", "status": "Indexing PDF", "message": remember_log(message)})
+            yield _sse("log", {"tone": "info", "status": status_formatter("Indexing PDF"), "message": remember_log(message)})
 
     yield await ingestion_task
 
@@ -291,14 +292,20 @@ async def _extract_stream(
     batch_records: list[dict[str, Any]] | None = None,
     batch_token_metrics: list[dict[str, Any] | None] | None = None,
     emit_done: bool = True,
+    progress_prefix: str = "",
+    log_token_metrics: bool = True,
 ) -> AsyncIterator[str]:
     backend_log_lines: list[str] = []
     backend_log_capture = _TeeLogCapture(sys.__stdout__)
     backend_error_capture = _TeeLogCapture(sys.__stderr__)
 
     def remember_log(message: str) -> str:
-        backend_log_lines.append(message)
-        return message
+        prefixed_message = f"{progress_prefix}{message}" if progress_prefix else message
+        backend_log_lines.append(prefixed_message)
+        return prefixed_message
+
+    def prefixed_status(status: str) -> str:
+        return f"{progress_prefix}{status}" if progress_prefix else status
 
     def captured_backend_log_text() -> str:
         return "\n".join(
@@ -320,15 +327,15 @@ async def _extract_stream(
             file_name = upload.filename or "upload.pdf"
             document_id = Path(file_name).stem or "uploaded_document"
 
-            yield _sse("log", {"tone": "info", "status": f"Document accepted: {file_name}", "message": remember_log(f"Document accepted: {file_name}")})
+            yield _sse("log", {"tone": "info", "status": prefixed_status(f"Document accepted: {file_name}"), "message": remember_log(f"Document accepted: {file_name}")})
             chunks = []
-            async for ingestion_event in _ingest_document_with_progress(uploaded_bytes, document_id, remember_log):
+            async for ingestion_event in _ingest_document_with_progress(uploaded_bytes, document_id, remember_log, prefixed_status):
                 if isinstance(ingestion_event, str):
                     yield ingestion_event
                 else:
                     chunks = ingestion_event
             raw_text = "\n\n".join(chunk.content for chunk in chunks)
-            yield _sse("log", {"tone": "success", "status": f"Indexed {len(chunks)} PDF text chunks", "message": remember_log(f"{len(chunks)} PDF text chunks indexed for hybrid retrieval.")})
+            yield _sse("log", {"tone": "success", "status": prefixed_status(f"Indexed {len(chunks)} PDF text chunks"), "message": remember_log(f"{len(chunks)} PDF text chunks indexed for hybrid retrieval.")})
 
             items = _template_items(template_payload)
             extraction_results: dict[str, Any] = {}
@@ -345,14 +352,14 @@ async def _extract_stream(
                 }
 
             if approach == "agentic":
-                yield _sse("log", {"tone": "info", "status": "Building dynamic ADK workflow graph", "message": remember_log("Building dynamic ADK workflow graph from Template Configurator payload.")})
+                yield _sse("log", {"tone": "info", "status": prefixed_status("Building dynamic ADK workflow graph"), "message": remember_log("Building dynamic ADK workflow graph from Template Configurator payload.")})
                 graph = build_dynamic_graph(template_payload)
 
                 async for progress in workflow_progress(template_payload):
-                    yield _sse("log", {"tone": "info", "message": remember_log(str(progress["status"])), **progress})
+                    yield _sse("log", {"tone": "info", **progress, "status": prefixed_status(str(progress["status"])), "message": remember_log(str(progress["status"]))})
                     await asyncio.sleep(0)
 
-                yield _sse("log", {"tone": "info", "status": "Executing ADK workflow graph", "message": remember_log("Executing ADK workflow graph and critic validation.")})
+                yield _sse("log", {"tone": "info", "status": prefixed_status("Executing ADK workflow graph"), "message": remember_log("Executing ADK workflow graph and critic validation.")})
                 retrieval_scope_token = set_current_document_id(document_id)
                 try:
                     workflow_output = await _run_adk_workflow(graph, {"template_payload": template_payload})
@@ -363,15 +370,15 @@ async def _extract_stream(
                     extraction_results.update(normalized_results)
                 token_cost_metrics = calculate_token_cost_metrics(workflow_output)
                 node_audit_summary = workflow_output.get("node_audit_summary", []) if isinstance(workflow_output, dict) else []
-                yield _sse("log", {"tone": "success", "status": "Committing structured extraction payload", "message": remember_log("ADK workflow completed; committing structured extraction payload.")})
+                yield _sse("log", {"tone": "success", "status": prefixed_status("Committing structured extraction payload"), "message": remember_log("ADK workflow completed; committing structured extraction payload.")})
             else:
-                yield _sse("log", {"tone": "info", "status": "Executing Pre-Injected RAG pipeline", "message": remember_log("Executing Pre-Injected RAG pipeline.")})
+                yield _sse("log", {"tone": "info", "status": prefixed_status("Executing Pre-Injected RAG pipeline"), "message": remember_log("Executing Pre-Injected RAG pipeline.")})
                 pre_injected_output: dict[str, Any] = {}
                 retrieval_scope_token = set_current_document_id(document_id)
                 try:
-                    async for stateless_event in run_pre_injected_extraction(document_id, template_payload):
+                    async for stateless_event in run_pre_injected_extraction(document_id, template_payload, log_final_metrics=log_token_metrics):
                         if isinstance(stateless_event, str):
-                            yield _sse("log", {"tone": "info", "status": stateless_event, "message": remember_log(stateless_event)})
+                            yield _sse("log", {"tone": "info", "status": prefixed_status(stateless_event), "message": remember_log(stateless_event)})
                             await asyncio.sleep(0)
                         else:
                             pre_injected_output = stateless_event
@@ -381,7 +388,7 @@ async def _extract_stream(
                 workflow_output = pre_injected_output.get("workflow_output", {})
                 token_cost_metrics = pre_injected_output.get("token_cost_metrics", calculate_token_cost_metrics(workflow_output))
                 node_audit_summary = pre_injected_output.get("node_audit_summary", [])
-                yield _sse("log", {"tone": "success", "status": "Committing structured extraction payload", "message": remember_log("Pre-Injected RAG pipeline completed; committing structured extraction payload.")})
+                yield _sse("log", {"tone": "success", "status": prefixed_status("Committing structured extraction payload"), "message": remember_log("Pre-Injected RAG pipeline completed; committing structured extraction payload.")})
 
             compiled_payload = {
                 "template": template_payload,
@@ -393,7 +400,7 @@ async def _extract_stream(
                 "status": "validated",
             }
             commit = await _fallback_commit(compiled_payload)
-            if approach == "agentic":
+            if approach == "agentic" and log_token_metrics:
                 log_token_cost_metrics(token_cost_metrics)
             remember_log("Database insert confirmation returned to client.")
             captured_backend_logs = captured_backend_log_text()
@@ -423,7 +430,7 @@ async def _extract_stream(
                 "backend_log_lines": backend_log_lines,
             }
             yield _sse("result", final_payload)
-            yield _sse("log", {"tone": "success", "status": "Database insert confirmation returned", "message": "Database insert confirmation returned to client."})
+            yield _sse("log", {"tone": "success", "status": prefixed_status("Database insert confirmation returned"), "message": "Database insert confirmation returned to client."})
             if emit_done:
                 yield _sse("done", {"ok": True, "status": "done"})
     except Exception as exc:
@@ -448,7 +455,7 @@ async def _extract_stream(
                 )
             )
         yield _sse("debug_log", {"message": backend_log_text})
-        yield _sse("log", {"tone": "error", "status": "Extraction failed", "message": error_message})
+        yield _sse("log", {"tone": "error", "status": prefixed_status("Extraction failed"), "message": error_message})
         yield _sse_data({"error": error_message, "backend_log_text": backend_log_text})
     finally:
         await upload.close()
@@ -496,20 +503,23 @@ async def _extract_batch_stream(files: list[UploadFile], request: ExtractionRequ
 
     for index, upload in enumerate(files, start=1):
         file_name = upload.filename or f"upload_{index}.pdf"
-        yield _sse("log", {"tone": "info", "status": f"Processing file {index}/{total_files}", "message": f"Processing {file_name} ({index} of {total_files})", "batch_id": batch_id, "file_name": file_name})
+        progress_prefix = f"[{index}/{total_files}] "
+        yield _sse("log", {"tone": "info", "status": f"{progress_prefix}Processing file", "message": f"{progress_prefix}Processing {file_name}: Starting extraction.", "batch_id": batch_id, "file_name": file_name})
         async for event in _extract_stream(
             upload,
             request,
             batch_records=batch_records,
             batch_token_metrics=batch_token_metrics,
             emit_done=False,
+            progress_prefix=progress_prefix,
+            log_token_metrics=False,
         ):
             yield event
-        yield _sse("log", {"tone": "success", "status": f"Completed file {index}/{total_files}", "message": f"Completed {file_name} ({index} of {total_files})", "batch_id": batch_id, "file_name": file_name})
+        yield _sse("log", {"tone": "success", "status": f"{progress_prefix}Completed file", "message": f"{progress_prefix}Completed {file_name}.", "batch_id": batch_id, "file_name": file_name})
         await asyncio.sleep(0)
 
     batch_metrics = combine_token_cost_metrics(batch_token_metrics)
-    log_token_cost_metrics(batch_metrics)
+    log_token_cost_metrics(batch_metrics, title="BEXTRACT MASTER BATCH LEDGER")
     export_info = _write_batch_exports(batch_id, batch_records)
     yield _sse("batch_export", {"ok": True, "status": "exports_ready", "exports": export_info, "records": batch_records, "token_cost_metrics": batch_metrics})
     yield _sse("log", {"tone": "success", "status": "Batch exports ready", "message": f"Compiled {len(batch_records)} row(s) into CSV and JSON batch exports.", "exports": export_info})
