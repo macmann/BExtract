@@ -872,6 +872,26 @@ export default function Home() {
         message,
       );
 
+    const batchProgress =
+      data.batch_progress && typeof data.batch_progress === "object"
+        ? (data.batch_progress as Record<string, unknown>)
+        : null;
+    const batchCurrent = Number(batchProgress?.current ?? 0);
+    const batchTotal = Number(batchProgress?.total ?? 0);
+    const isBatchFileResult =
+      normalizedEvent === "result" && batchTotal > 1 && batchCurrent > 0;
+
+    if (normalizedEvent === "batch_export") {
+      const metrics = normalizeTokenCostMetrics(data.token_cost_metrics);
+      if (metrics) setTokenCostMetrics(metrics);
+      appendLog(
+        "success",
+        message || "Extraction completed successfully for all files.",
+      );
+      setIsLoading(false);
+      return;
+    }
+
     if (
       ["result", "complete", "completed", "done", "final"].includes(
         normalizedEvent,
@@ -888,9 +908,22 @@ export default function Home() {
         setBackendLogText(data.backend_log_text);
         setDebugLogText(data.backend_log_text);
       }
+
+      if (isBatchFileResult) {
+        appendLog(
+          "success",
+          batchCurrent < batchTotal
+            ? `File ${batchCurrent}/${batchTotal} completed. Continuing batch extraction...`
+            : `File ${batchCurrent}/${batchTotal} completed. Preparing final batch exports...`,
+        );
+        return;
+      }
+
       appendLog(
         "success",
-        "Extraction stream completed and field cards were updated.",
+        batchTotal > 1
+          ? `Extraction completed successfully for ${batchTotal}/${batchTotal} files. Field cards were updated with the latest file results.`
+          : "Extraction completed successfully. Field cards were updated.",
       );
       setIsLoading(false);
     }
@@ -909,7 +942,7 @@ export default function Home() {
 
     if (!dataText) return dataText;
     if (dataText === "[DONE]") {
-      appendLog("success", "Extraction stream completed.");
+      appendLog("success", "Extraction stream completed successfully.");
       setIsLoading(false);
       return dataText;
     }
