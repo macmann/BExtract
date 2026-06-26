@@ -34,16 +34,37 @@ def _reset_llm_request_to_stateless_turn(callback_context=None, llm_request=None
     if llm_request is None:
         return None
 
-    llm_request.previous_interaction_id = None
     if not llm_request.contents:
+        llm_request.previous_interaction_id = None
         return None
 
+    if _contains_function_response(llm_request.contents):
+        # Gemini requires each tool/function response to immediately follow the
+        # model turn that requested it.  During the tool-continuation request,
+        # ADK has already assembled that adjacent function-call/function-response
+        # transcript; trimming it to only the latest user turn would leave an
+        # orphaned function response and the provider rejects the request with
+        # INVALID_ARGUMENT.  Keep this continuation turn intact and let the next
+        # ordinary model request be reduced back to a single user payload.
+        return None
+
+    llm_request.previous_interaction_id = None
     latest_user_content = next(
         (content for content in reversed(llm_request.contents) if getattr(content, "role", None) == "user"),
         llm_request.contents[-1],
     )
     llm_request.contents = [latest_user_content]
     return None
+
+
+def _contains_function_response(contents: list[Any]) -> bool:
+    """Return True when an ADK request is continuing after a tool response."""
+
+    for content in contents:
+        for part in getattr(content, "parts", []) or []:
+            if getattr(part, "function_response", None) is not None:
+                return True
+    return False
 
 
 scalar_extractor = LlmAgent(
