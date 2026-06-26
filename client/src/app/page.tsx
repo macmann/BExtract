@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
 import {
   AlertTriangle,
@@ -33,6 +33,7 @@ type FieldCard = {
 };
 
 type ExtractionResult = {
+  fieldId?: string;
   field: string;
   value: string;
   confidence: string;
@@ -100,16 +101,20 @@ function UploadDropzone({ file, onFileChange }: { file: File | null; onFileChang
   );
 }
 
-function FieldCardEditor({ field, onChange, onRemove }: { field: FieldCard; onChange: (field: FieldCard) => void; onRemove: () => void }) {
+function FieldCardEditor({ field, result, onChange, onRemove }: { field: FieldCard; result?: ExtractionResult; onChange: (field: FieldCard) => void; onRemove: () => void }) {
   return (
     <article className="rounded-2xl border border-slate-700/80 bg-slate-900/70 p-4 shadow-2xl shadow-black/20">
       <div className="mb-4 flex items-center justify-between border-b border-slate-800 pb-3">
         <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.2em] text-slate-400">
           <Layers3 className="h-4 w-4 text-cyan-300" /> Field Card #{field.id}
         </div>
-        <button onClick={onRemove} className="rounded-md p-1 text-slate-500 hover:bg-red-500/10 hover:text-red-300" aria-label="Remove field">
-          <X className="h-4 w-4" />
-        </button>
+        <div className="flex items-center gap-2">
+          {result?.status === "validated" && <CheckCircle2 className="h-5 w-5 text-emerald-300" aria-label="Verified field" />}
+          {result?.status === "alert" && <AlertTriangle className="h-5 w-5 text-red-300" aria-label="Validation alert" />}
+          <button onClick={onRemove} className="rounded-md p-1 text-slate-500 hover:bg-red-500/10 hover:text-red-300" aria-label="Remove field">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
       </div>
       <div className="grid gap-3 lg:grid-cols-2">
         <label className="space-y-1.5">
@@ -137,11 +142,25 @@ function FieldCardEditor({ field, onChange, onRemove }: { field: FieldCard; onCh
           </button>
         ))}
       </div>
+      {result && (
+        <div className={`mt-4 rounded-xl border p-3 ${result.status === "alert" ? "border-red-300/50 bg-red-950/30" : "border-emerald-300/30 bg-emerald-400/[0.06]"}`}>
+          <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-400">Extracted Value</p>
+          <p className="mt-1 text-sm font-semibold text-slate-50">{result.value || "No value returned"}</p>
+          <p className="mt-1 text-xs text-slate-400">Confidence {result.confidence}</p>
+          {result.status === "alert" && <p className="mt-2 text-xs font-semibold text-red-200">{result.alert}</p>}
+        </div>
+      )}
     </article>
   );
 }
 
 function LogsPanel({ logs, isLoading }: { logs: RuntimeLog[]; isLoading: boolean }) {
+  const logsEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [logs]);
+
   return (
     <section className="rounded-2xl border border-slate-700 bg-slate-950/80 shadow-2xl shadow-black/30">
       <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-800 bg-slate-950/95 px-4 py-3 backdrop-blur">
@@ -149,12 +168,13 @@ function LogsPanel({ logs, isLoading }: { logs: RuntimeLog[]; isLoading: boolean
         <span className="rounded-full bg-emerald-400/10 px-2 py-1 text-[10px] font-bold uppercase tracking-widest text-emerald-300">{isLoading ? "Live" : "Idle"}</span>
       </div>
       <div className="max-h-64 space-y-2 overflow-y-auto p-4 font-mono text-xs">
-        {logs.map((log) => (
-          <div key={`${log.time}-${log.text}`} className="grid grid-cols-[64px_1fr] gap-3 rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2">
+        {logs.map((log, index) => (
+          <div key={`${log.time}-${index}-${log.text}`} className="grid grid-cols-[64px_1fr] gap-3 rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2">
             <span className="text-slate-500">{log.time}</span>
             <span className={log.tone === "success" ? "text-emerald-300" : log.tone === "warn" ? "text-amber-300" : log.tone === "error" ? "text-red-300" : "text-cyan-100"}>{log.text}</span>
           </div>
         ))}
+        <div ref={logsEndRef} />
       </div>
     </section>
   );
@@ -206,6 +226,83 @@ export default function Home() {
   const timestamp = () => new Date().toLocaleTimeString("en-US", { hour12: false });
   const appendLog = (tone: RuntimeLog["tone"], text: string) => setRuntimeLogs((current) => [...current, { time: timestamp(), tone, text }]);
 
+  const coerceTone = (tone: unknown): RuntimeLog["tone"] => {
+    if (tone === "success" || tone === "warn" || tone === "error") return tone;
+    return "info";
+  };
+
+  const formatConfidence = (confidence: unknown) => {
+    if (typeof confidence === "number") return confidence <= 1 ? `${Math.round(confidence * 100)}%` : `${Math.round(confidence)}%`;
+    return String(confidence ?? "n/a");
+  };
+
+  const findFieldForResult = (row: Record<string, unknown>) => {
+    const resultId = String(row.field_id ?? row.item_id ?? row.id ?? "");
+    const resultName = String(row.field_name ?? row.field ?? row.name ?? "").toLowerCase();
+
+    return fields.find((field) => String(field.id) === resultId || field.name.toLowerCase() === resultName);
+  };
+
+  const mapFinalPayloadToResults = (payload: Record<string, unknown>): ExtractionResult[] => {
+    const rawResults = Array.isArray(payload.results)
+      ? payload.results
+      : Array.isArray((payload.structured_json as Record<string, unknown> | undefined)?.results)
+        ? ((payload.structured_json as Record<string, unknown>).results as unknown[])
+        : Object.values(((payload.structured_json as Record<string, unknown> | undefined)?.results ?? payload.extracted_values ?? {}) as Record<string, unknown>);
+
+    return rawResults.map((rawResult) => {
+      const row = (typeof rawResult === "object" && rawResult !== null ? rawResult : { value: rawResult }) as Record<string, unknown>;
+      const field = findFieldForResult(row);
+      const validation = (row.validation ?? row.critic ?? row.error) as Record<string, unknown> | string | undefined;
+      const alert = typeof validation === "string" ? validation : String(row.alert ?? row.validation_error ?? validation?.message ?? validation?.error ?? "");
+      const isAlert = Boolean(alert) || row.status === "alert" || row.valid === false || validation && typeof validation === "object" && validation.valid === false;
+
+      return {
+        fieldId: field ? String(field.id) : String(row.field_id ?? row.item_id ?? row.id ?? ""),
+        field: field?.name ?? String(row.field_name ?? row.field ?? row.name ?? row.item_id ?? "Unknown field"),
+        value: String(row.value ?? row.extracted_value ?? row.answer ?? ""),
+        confidence: formatConfidence(row.confidence ?? row.score),
+        status: isAlert ? "alert" : "validated",
+        alert: isAlert ? alert || "Critic Agent flagged this field for review." : undefined,
+      };
+    });
+  };
+
+  const handleSseData = (eventName: string | undefined, data: Record<string, unknown>) => {
+    const message = String(data.message ?? data.status ?? data.detail ?? data.log ?? "");
+    const normalizedEvent = eventName ?? String(data.event ?? data.type ?? "message");
+
+    if (message) appendLog(coerceTone(data.tone ?? (normalizedEvent === "error" ? "error" : undefined)), message);
+
+    if (["result", "complete", "completed", "done", "final"].includes(normalizedEvent) || data.results || data.structured_json || data.extracted_values) {
+      const results = mapFinalPayloadToResults(data);
+      if (results.length > 0) setExtractionResults(results);
+      appendLog("success", "Extraction stream completed and field cards were updated.");
+    }
+  };
+
+  const parseSseEvent = (rawEvent: string) => {
+    const lines = rawEvent.split(/\r?\n/);
+    const eventName = lines.find((line) => line.startsWith("event:"))?.slice(6).trim();
+    const dataText = lines
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n");
+
+    if (!dataText) return dataText;
+    if (dataText === "[DONE]") {
+      appendLog("success", "Extraction stream completed.");
+      return dataText;
+    }
+
+    try {
+      handleSseData(eventName, JSON.parse(dataText) as Record<string, unknown>);
+    } catch {
+      appendLog("info", dataText);
+    }
+    return dataText;
+  };
+
   const handleRunExtraction = async () => {
     if (!file) {
       appendLog("warn", "Select a PDF before starting extraction.");
@@ -216,21 +313,23 @@ export default function Home() {
     setRuntimeLogs([]);
     setExtractionResults([]);
 
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("payload", JSON.stringify({
-      items: fields.map((field) => ({
-        id: String(field.id),
-        name: field.name,
-        definition: field.definition,
-        type: field.routeType,
-        dataType: field.dataType,
-      })),
+    const fieldPayload = fields.map((field) => ({
+      id: String(field.id),
+      name: field.name,
+      definition: field.definition,
+      routeType: field.routeType,
+      dataType: field.dataType,
     }));
+    const formData = new FormData();
+    formData.append("file", file, file.name);
+    formData.append("fields", JSON.stringify(fieldPayload));
+    formData.append("payload", JSON.stringify({ items: fieldPayload }));
 
     try {
+      appendLog("info", `Uploading ${file.name} with ${fields.length} field card${fields.length === 1 ? "" : "s"}.`);
       const response = await fetch("/api/extract", { method: "POST", body: formData });
-      if (!response.ok || !response.body) throw new Error(`Extraction request failed with ${response.status}`);
+      if (!response.ok) throw new Error(`Extraction request failed with ${response.status}`);
+      if (!response.body) throw new Error("Extraction response did not include a readable stream.");
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -238,30 +337,15 @@ export default function Home() {
 
       while (true) {
         const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const events = buffer.split("\n\n");
-        buffer = events.pop() ?? "";
+        buffer += decoder.decode(value, { stream: !done });
+        const events = buffer.split(/\r?\n\r?\n/);
+        buffer = done ? "" : events.pop() ?? "";
 
-        for (const rawEvent of events) {
-          const eventName = rawEvent.match(/^event: (.+)$/m)?.[1];
-          const dataLine = rawEvent.match(/^data: (.+)$/m)?.[1];
-          if (!dataLine) continue;
-          const data = JSON.parse(dataLine);
-          if (eventName === "log") appendLog(data.tone ?? "info", data.message);
-          if (eventName === "result") {
-            const rows = Object.values(data.structured_json?.results ?? {}) as Array<Record<string, unknown>>;
-            setExtractionResults(rows.map((row) => ({
-              field: String(row.field_name ?? row.item_id ?? "Unknown field"),
-              value: String(row.value ?? ""),
-              confidence: typeof row.confidence === "number" ? `${Math.round(row.confidence * 100)}%` : String(row.confidence ?? "n/a"),
-              status: "validated",
-            })));
-            appendLog("success", `Database status: ${data.database?.status ?? "confirmed"}`);
-          }
-          if (eventName === "error") appendLog("error", data.detail ?? "Unknown extraction error");
-        }
+        for (const rawEvent of events) parseSseEvent(rawEvent);
+        if (done) break;
       }
+
+      if (buffer.trim()) parseSseEvent(buffer);
     } catch (error) {
       appendLog("error", error instanceof Error ? error.message : "Extraction request failed");
     } finally {
@@ -278,11 +362,11 @@ export default function Home() {
               <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.28em] text-cyan-300"><CircleDollarSign className="h-4 w-4" /> BExtractor</p>
               <h1 className="mt-2 text-2xl font-black tracking-tight text-white">Template Configurator</h1>
             </div>
-            <div className="flex gap-2"><button onClick={handleRunExtraction} disabled={isLoading} className="inline-flex items-center gap-2 rounded-xl bg-emerald-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-emerald-200 disabled:cursor-not-allowed disabled:opacity-60"><Play className="h-4 w-4" /> {isLoading ? "Running" : "Run"}</button><button onClick={addField} className="inline-flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-cyan-200"><Plus className="h-4 w-4" /> Add Field</button></div>
+            <div className="flex gap-2"><button onClick={handleRunExtraction} disabled={isLoading} className="inline-flex items-center gap-2 rounded-xl bg-emerald-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-emerald-200 disabled:cursor-not-allowed disabled:opacity-60"><Play className="h-4 w-4" /> {isLoading ? "Running" : "Run Extraction"}</button><button onClick={addField} className="inline-flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-cyan-200"><Plus className="h-4 w-4" /> Add Field</button></div>
           </header>
           <UploadDropzone file={file} onFileChange={setFile} />
           <div className="mt-4 grid gap-4 2xl:grid-cols-2">
-            {fields.map((field) => <FieldCardEditor key={field.id} field={field} onChange={updateField} onRemove={() => setFields((current) => current.filter((item) => item.id !== field.id))} />)}
+            {fields.map((field) => <FieldCardEditor key={field.id} field={field} result={extractionResults.find((result) => result.fieldId === String(field.id) || result.field === field.name)} onChange={updateField} onRemove={() => setFields((current) => current.filter((item) => item.id !== field.id))} />)}
           </div>
         </section>
 
