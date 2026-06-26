@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
+from pydantic import BaseModel, ConfigDict
 
 from server.ingestion import ingest_document
 from server.custom_tools import reset_current_document_id, set_current_document_id
@@ -28,6 +29,7 @@ from server.pipeline import (
     log_token_cost_metrics,
     normalize_workflow_results,
     record_node_token_audit,
+    run_pre_injected_extraction,
     workflow_progress,
 )
 
@@ -43,6 +45,14 @@ if missing_env_vars:
 app = FastAPI(title="BExtractor API")
 
 CLIENT_OUT_DIR = (Path(__file__).resolve().parent / ".." / "client" / "out").resolve()
+
+
+class ExtractionRequestPayload(BaseModel):
+    """Multipart JSON payload sent with an extraction request."""
+
+    model_config = ConfigDict(extra="allow")
+
+    approach: str = "agentic"
 
 
 async def log_document_chunk_embedding_column_type() -> None:
@@ -269,7 +279,7 @@ class _TeeLogCapture(io.StringIO):
         return self._stream.fileno()
 
 
-async def _extract_stream(upload: UploadFile, template_payload: dict[str, Any]) -> AsyncIterator[str]:
+async def _extract_stream(upload: UploadFile, request: ExtractionRequestPayload) -> AsyncIterator[str]:
     backend_log_lines: list[str] = []
     backend_log_capture = _TeeLogCapture(sys.__stdout__)
     backend_error_capture = _TeeLogCapture(sys.__stderr__)
@@ -287,6 +297,13 @@ async def _extract_stream(upload: UploadFile, template_payload: dict[str, Any]) 
 
     try:
         with redirect_stdout(backend_log_capture), redirect_stderr(backend_error_capture):
+            template_payload = request.model_dump()
+            approach = str(
+                template_payload.get("extractionApproach")
+                or template_payload.get("approach")
+                or request.approach
+                or "agentic"
+            )
             uploaded_bytes = await upload.read()
             file_name = upload.filename or "upload.pdf"
             document_id = Path(file_name).stem or "uploaded_document"
@@ -301,15 +318,8 @@ async def _extract_stream(upload: UploadFile, template_payload: dict[str, Any]) 
             raw_text = "\n\n".join(chunk.content for chunk in chunks)
             yield _sse("log", {"tone": "success", "status": f"Indexed {len(chunks)} PDF text chunks", "message": remember_log(f"{len(chunks)} PDF text chunks indexed for hybrid retrieval.")})
 
-            yield _sse("log", {"tone": "info", "status": "Building dynamic ADK workflow graph", "message": remember_log("Building dynamic ADK workflow graph from Template Configurator payload.")})
-            graph = build_dynamic_graph(template_payload)
-
             items = _template_items(template_payload)
             extraction_results: dict[str, Any] = {}
-            async for progress in workflow_progress(template_payload):
-                yield _sse("log", {"tone": "info", "message": remember_log(str(progress["status"])), **progress})
-                await asyncio.sleep(0)
-
             for index, item in enumerate(items, start=1):
                 item_id = str(item.get("id") or item.get("key") or item.get("name") or f"item_{index}")
                 item_name = str(item.get("name") or item_id)
@@ -322,16 +332,44 @@ async def _extract_stream(upload: UploadFile, template_payload: dict[str, Any]) 
                     "evidence": "Workflow execution streamed by backend prototype.",
                 }
 
-            yield _sse("log", {"tone": "info", "status": "Executing ADK workflow graph", "message": remember_log("Executing ADK workflow graph and critic validation.")})
-            retrieval_scope_token = set_current_document_id(document_id)
-            try:
-                workflow_output = await _run_adk_workflow(graph, {"template_payload": template_payload})
-            finally:
-                reset_current_document_id(retrieval_scope_token)
-            normalized_results = normalize_workflow_results(template_payload, workflow_output)
-            if normalized_results:
-                extraction_results.update(normalized_results)
-            yield _sse("log", {"tone": "success", "status": "Committing structured extraction payload", "message": remember_log("ADK workflow completed; committing structured extraction payload.")})
+            if approach == "agentic":
+                yield _sse("log", {"tone": "info", "status": "Building dynamic ADK workflow graph", "message": remember_log("Building dynamic ADK workflow graph from Template Configurator payload.")})
+                graph = build_dynamic_graph(template_payload)
+
+                async for progress in workflow_progress(template_payload):
+                    yield _sse("log", {"tone": "info", "message": remember_log(str(progress["status"])), **progress})
+                    await asyncio.sleep(0)
+
+                yield _sse("log", {"tone": "info", "status": "Executing ADK workflow graph", "message": remember_log("Executing ADK workflow graph and critic validation.")})
+                retrieval_scope_token = set_current_document_id(document_id)
+                try:
+                    workflow_output = await _run_adk_workflow(graph, {"template_payload": template_payload})
+                finally:
+                    reset_current_document_id(retrieval_scope_token)
+                normalized_results = normalize_workflow_results(template_payload, workflow_output)
+                if normalized_results:
+                    extraction_results.update(normalized_results)
+                token_cost_metrics = calculate_token_cost_metrics(workflow_output)
+                node_audit_summary = workflow_output.get("node_audit_summary", []) if isinstance(workflow_output, dict) else []
+                yield _sse("log", {"tone": "success", "status": "Committing structured extraction payload", "message": remember_log("ADK workflow completed; committing structured extraction payload.")})
+            else:
+                yield _sse("log", {"tone": "info", "status": "Executing Pre-Injected RAG pipeline", "message": remember_log("Executing Pre-Injected RAG pipeline.")})
+                pre_injected_output: dict[str, Any] = {}
+                retrieval_scope_token = set_current_document_id(document_id)
+                try:
+                    async for stateless_event in run_pre_injected_extraction(document_id, template_payload):
+                        if isinstance(stateless_event, str):
+                            yield _sse("log", {"tone": "info", "status": stateless_event, "message": remember_log(stateless_event)})
+                            await asyncio.sleep(0)
+                        else:
+                            pre_injected_output = stateless_event
+                finally:
+                    reset_current_document_id(retrieval_scope_token)
+                extraction_results.update(pre_injected_output.get("results", {}))
+                workflow_output = pre_injected_output.get("workflow_output", {})
+                token_cost_metrics = pre_injected_output.get("token_cost_metrics", calculate_token_cost_metrics(workflow_output))
+                node_audit_summary = pre_injected_output.get("node_audit_summary", [])
+                yield _sse("log", {"tone": "success", "status": "Committing structured extraction payload", "message": remember_log("Pre-Injected RAG pipeline completed; committing structured extraction payload.")})
 
             compiled_payload = {
                 "template": template_payload,
@@ -343,10 +381,8 @@ async def _extract_stream(upload: UploadFile, template_payload: dict[str, Any]) 
                 "status": "validated",
             }
             commit = await _fallback_commit(compiled_payload)
-            token_cost_metrics = calculate_token_cost_metrics(workflow_output)
-            log_token_cost_metrics(token_cost_metrics)
-
-            node_audit_summary = workflow_output.get("node_audit_summary", []) if isinstance(workflow_output, dict) else []
+            if approach == "agentic":
+                log_token_cost_metrics(token_cost_metrics)
             remember_log("Database insert confirmation returned to client.")
             captured_backend_logs = captured_backend_log_text()
             backend_log_text = _format_backend_log_export(backend_log_lines, token_cost_metrics, node_audit_summary)
@@ -394,15 +430,22 @@ async def extract_document(file: UploadFile = File(...), payload: str = Form(...
 
     try:
         template_payload = json.loads(payload)
+        request_payload = ExtractionRequestPayload.model_validate(template_payload)
     except json.JSONDecodeError as exc:
         return StreamingResponse(
             iter([_sse_data({"error": f"Invalid template payload JSON: {exc}"})]),
             media_type="text/event-stream",
             status_code=400,
         )
+    except ValueError as exc:
+        return StreamingResponse(
+            iter([_sse_data({"error": f"Invalid extraction request payload: {exc}"})]),
+            media_type="text/event-stream",
+            status_code=400,
+        )
 
     return StreamingResponse(
-        _extract_stream(file, template_payload),
+        _extract_stream(file, request_payload),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

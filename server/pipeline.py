@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
+import os
 import re
 from collections.abc import AsyncIterator
 from typing import Any
@@ -14,8 +15,10 @@ from google.adk.agents import LlmAgent
 from google.adk.events import Event
 from google.adk.events.event_actions import EventActions
 from google.adk.workflow import FunctionNode
+from google import genai
+from google.genai import types
 
-from server.custom_tools import search_tool
+from server.custom_tools import document_hybrid_search, search_tool
 
 INPUT_RATE_PER_MILLION = 1.50
 OUTPUT_RATE_PER_MILLION = 9.00
@@ -195,6 +198,21 @@ def log_token_cost_metrics(metrics: dict[str, Any]) -> None:
     print("--------------------------------------")
     print(f"[Total]   Tokens: {total_tokens:,} | Total Cost: ${total_cost:.4f}")
     print("======================================")
+
+
+def _metrics_from_usage_entries(usage_entries: list[tuple[int, int]]) -> dict[str, Any]:
+    input_tokens = sum(input_count for input_count, _ in usage_entries)
+    output_tokens = sum(output_count for _, output_count in usage_entries)
+    input_cost = (input_tokens / 1_000_000) * INPUT_RATE_PER_MILLION
+    output_cost = (output_tokens / 1_000_000) * OUTPUT_RATE_PER_MILLION
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "input_cost": input_cost,
+        "output_cost": output_cost,
+        "total_cost": input_cost + output_cost,
+    }
 
 
 
@@ -660,6 +678,109 @@ async def workflow_progress(template_payload: dict[str, Any]) -> AsyncIterator[d
     for index, item in enumerate(_template_items(template_payload), start=1):
         item_name = str(item.get("name") or item.get("id") or item.get("key") or f"Item {index}")
         yield {"status": f"Processing {item_name}", "item": item_name, "index": index}
+
+
+def _pre_injected_prompt(item: dict[str, Any], item_id: str, item_name: str, chunks: str) -> str:
+    item_type = str(item.get("type") or item.get("routeType") or "Scalar")
+    definition = str(item.get("definition") or item.get("description") or "")
+    data_type = str(item.get("dataType") or item.get("data_type") or "String")
+    return (
+        "You are extracting one field from a document using only the retrieved evidence below.\n"
+        "Return strict JSON only. Do not wrap the JSON in markdown.\n"
+        "Required keys: item_id, field_name, value, unit, confidence, evidence, critique_response.\n"
+        "For tabular fields, put the parsed row array in value.\n\n"
+        f"Item ID: {item_id}\n"
+        f"Field name: {item_name}\n"
+        f"Field type: {item_type}\n"
+        f"Expected data type/unit: {data_type}\n"
+        f"Definition: {definition}\n\n"
+        "Retrieved document chunks:\n"
+        f"{chunks}\n"
+    )
+
+
+async def run_pre_injected_extraction(
+    document_id: str,
+    template: dict[str, Any],
+    *,
+    model: str = "gemini-3.5-flash",
+) -> AsyncIterator[dict[str, Any] | str]:
+    """Run stateless per-field RAG extraction without ADK Runner orchestration."""
+
+    yield "Executing stateless extraction..."
+    client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+    extraction_results: dict[str, Any] = {}
+    events: list[dict[str, Any]] = []
+    node_audit_summary: list[dict[str, Any]] = []
+    usage_entries: list[tuple[int, int]] = []
+
+    for index, item in enumerate(_template_items(template), start=1):
+        item_id = _item_id(item, index)
+        item_name = str(item.get("name") or item.get("label") or item_id)
+        definition = str(item.get("definition") or item.get("description") or "")
+        yield f"Processing {item_name}"
+
+        chunks = await document_hybrid_search(item_name, definition)
+        prompt = _pre_injected_prompt(item, item_id, item_name, chunks)
+        response = await client.aio.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+        )
+        response_payload = response.model_dump(mode="json") if hasattr(response, "model_dump") else response
+        events.append({"node_name": f"pre_injected_{item_id}", "response": response_payload})
+        current_usage = _iter_usage_metadata(response_payload)
+        usage_entries.extend(current_usage)
+
+        input_tokens = sum(input_count for input_count, _ in current_usage)
+        output_tokens = sum(output_count for _, output_count in current_usage)
+        node_audit_summary.append(
+            {
+                "node_name": f"pre_injected_{item_id}"[:80],
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "dynamic_context_length": _estimated_context_length(prompt),
+                "estimated_cost": _node_cost(input_tokens, output_tokens),
+            }
+        )
+
+        raw_text = getattr(response, "text", "") or ""
+        parsed = _parse_result_payload(raw_text)
+        if not isinstance(parsed, dict):
+            parsed = {
+                "item_id": item_id,
+                "field_name": item_name,
+                "value": parsed,
+                "unit": item.get("dataType", "String"),
+                "confidence": 0.0,
+                "evidence": chunks,
+                "critique_response": "Model response was not a JSON object; raw value preserved.",
+            }
+        extraction_results[item_id] = {
+            "item_id": str(_case_insensitive_get(parsed, "item_id", "item id", default=item_id)),
+            "field_name": str(_case_insensitive_get(parsed, "field_name", "field name", "table_name", "table name", default=item_name)),
+            "value": _case_insensitive_get(parsed, "value", "rows", "data", "answer", default=""),
+            "unit": _case_insensitive_get(parsed, "unit", "data_type", "data type", default=item.get("dataType", "String")),
+            "confidence": _case_insensitive_get(parsed, "confidence", "score", default=0.0),
+            "evidence": _case_insensitive_get(parsed, "evidence", "source", "citation", default=chunks),
+            "critique_response": _case_insensitive_get(parsed, "critique_response", "critique response", default=""),
+        }
+
+    token_cost_metrics = _metrics_from_usage_entries(usage_entries)
+    log_token_cost_metrics(token_cost_metrics)
+    log_graph_token_audit_ledger(node_audit_summary)
+    yield {
+        "results": extraction_results,
+        "workflow_output": {
+            "events": events,
+            "state": {"compiled_payload": {"template": template, "results": extraction_results}},
+            "node_audit_summary": node_audit_summary,
+            "approach": "pre_injected",
+            "document_id": document_id,
+        },
+        "token_cost_metrics": token_cost_metrics,
+        "node_audit_summary": node_audit_summary,
+    }
 
 def build_dynamic_graph(template_payload: dict) -> Workflow:
     """Build a Google ADK workflow graph from the UI extraction template."""
