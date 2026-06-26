@@ -15,7 +15,7 @@ The platform is easiest to understand as five connected layers:
 | Layer | What it contains | Main responsibility |
 | --- | --- | --- |
 | 1. Experience | Next.js static UI | Template builder, PDF upload, live progress logs, and final extraction review. |
-| 2. API / Orchestration | FastAPI, SSE, ADK workflow runner | Request handling, workflow construction, progress streaming, and result delivery. |
+| 2. API / Orchestration | FastAPI, SSE, ADK workflow runner, optional pre-injected RAG runner | Request handling, workflow construction, progress streaming, token/cost auditing, and result delivery. |
 | 3. Document Intelligence | PDF parsing, chunking, embeddings, hybrid search | Converts documents into retrievable evidence chunks. |
 | 4. Agent Runtime | Scalar extractor, tabular extractor, critic agent | Performs extraction, validates the payload, and retries failed items. |
 | 5. Persistence | PostgreSQL, Prisma, `pgvector` | Stores templates, chunks, vectors, raw text, and validated structured JSON. |
@@ -78,12 +78,14 @@ The platform is easiest to understand as five connected layers:
 | Vector database | PostgreSQL with `pgvector` | Stores chunk text, metadata, and 3072-dimensional embeddings for semantic retrieval. |
 | Relational data store | PostgreSQL + Prisma | Stores templates, extraction results, raw text, chunk metadata, and final structured JSON. |
 | Hybrid search tool | `server/custom_tools.py` | Combines dense vector search, BM25 sparse search, and Reciprocal Rank Fusion. |
-| Agent workflow | Google ADK `Workflow` | Dynamically creates extraction nodes from the submitted template and routes validation/retry behavior. |
+| Agent workflow | Google ADK `Workflow` | Dynamically creates extraction nodes from the submitted template and routes validation/retry behavior for the default agentic path. |
+| Pre-injected RAG runner | Direct Gemini generation with retrieved chunks | Optional stateless extraction path that retrieves evidence first, injects it into a per-field prompt, and records the same token/cost audit shape. |
+| Runtime observability | SSE, captured backend logs, token/cost audit ledger | Streams user-facing progress, exports troubleshooting logs, and reports per-node token usage and estimated cost. |
 | LLM agents | Gemini via Google ADK | Scalar extraction, tabular extraction, and critic validation. |
 
 ## End-to-End Extraction Flow
 
-The extraction run has two major phases: **index the uploaded PDF**, then **run agent extraction against the indexed evidence**.
+The extraction run has two major phases: **index the uploaded PDF**, then **run extraction against the indexed evidence**. The default `agentic` approach uses the dynamic Google ADK workflow. A second pre-injected RAG approach can run stateless per-field Gemini calls after hybrid retrieval has selected the evidence chunks.
 
 ```text
 PHASE 1 - INDEX THE DOCUMENT
@@ -121,9 +123,11 @@ PHASE 2 - EXTRACT, VALIDATE, AND COMMIT
 
 FastAPI
   |
-  | 8. Build Google ADK workflow from template items
+  | 8. Choose extraction approach from payload
+  |    - agentic: build Google ADK workflow from template items
+  |    - pre-injected: retrieve chunks first and call Gemini per item
   v
-Dynamic ADK workflow
+Dynamic extraction runtime
   |
   | 9. For each scalar/table item, choose extractor type
   v
@@ -176,9 +180,9 @@ The document processing pipeline has clear subsystem ownership. Each step transf
 | 4 | Chunker | Page text | Overlapping text chunks | Preserves local context while keeping retrieval units small. |
 | 5 | Embedding generator | Chunk text | 3072-dimensional vector | Enables semantic search over document evidence. |
 | 6 | Prisma/raw SQL | Chunk text, metadata, vector | `DocumentChunk` rows | Persists source evidence for search and traceability. |
-| 7 | ADK graph builder | Template JSON | Dynamic workflow nodes | Creates one extraction path per requested field/table. |
+| 7 | Runtime selector | Template JSON and `approach` / `extractionApproach` | ADK workflow nodes or pre-injected per-field prompts | Creates one extraction path per requested field/table. |
 | 8 | Extractor agents | Item definition and retrieved context | Strict JSON value/table rows | Produces structured extraction output. |
-| 9 | Critic agent | Compiled payload | Pass/fail decision and optional critique | Adds quality control and targeted retry. |
+| 9 | Critic agent / audit layer | Compiled payload and model events | Pass/fail decision, optional critique, token/cost metrics | Adds quality control, targeted retry, and operational cost visibility. |
 | 10 | Commit node | Validated payload | `ExtractionResult` row | Stores final result for downstream review and integration. |
 
 ### Pipeline Flow Chart
@@ -221,6 +225,34 @@ The document processing pipeline has clear subsystem ownership. Each step transf
                                |                |
                                v                |
                          [SSE Final JSON] <-----+
+```
+
+
+## Extraction Approach Selection and Observability
+
+The API accepts an `approach` or `extractionApproach` value in the template payload. When the value is `agentic`, FastAPI builds the dynamic ADK workflow, executes it through the ADK `Runner`, normalizes returned item results, and routes the critic result to either a targeted retry or database commit. When the value is anything else, the backend runs the pre-injected RAG path: each template item calls hybrid search first, the retrieved evidence is embedded directly into a strict JSON prompt, and Gemini returns one normalized item result at a time.
+
+Both paths share the same ingestion, retrieval scope, result normalization, database commit, and SSE response envelope. The response includes `token_cost_metrics`, `node_audit_summary`, `backend_log_text`, and `backend_log_lines` so operators can inspect token usage, estimated cost, node-level activity, and captured backend diagnostics from the browser.
+
+```text
+/api/extract
+  |
+  v
+[Index PDF chunks once]
+  |
+  v
+[Read approach / extractionApproach]
+  |
+  +--> agentic ------------------> [ADK Runner + critic + retry routing]
+  |                                      |
+  |                                      v
+  +--> pre-injected RAG ----------> [Hybrid search + direct Gemini per item]
+                                         |
+                                         v
+                         [Normalize results + token/cost audit]
+                                         |
+                                         v
+                         [Prisma commit + SSE result/debug logs]
 ```
 
 ## Agent Topology
@@ -449,4 +481,4 @@ BExtract/
 - **Traceability**: Results include source evidence and are linked to raw text, chunks, metadata, and template records.
 - **Retrieval quality**: Combining `pgvector` semantic retrieval with BM25 keyword ranking reduces misses on both paraphrased content and exact financial terms.
 - **Validation loop**: The critic/retry design improves reliability for high-value documents where subtotals, ratios, date ranges, and accounting relationships matter.
-- **Deployment simplicity**: The current architecture is deployable as one Render web service while still preserving clean separation between UI, API, ingestion, retrieval, orchestration, and persistence concerns.
+- **Deployment simplicity**: The current architecture is deployable as one Render web service while still preserving clean separation between UI, API, ingestion, retrieval, orchestration, and persistence concerns. Render starts the app from the repository root with `uvicorn server.main:app --host 0.0.0.0 --port $PORT` so package imports resolve consistently.
