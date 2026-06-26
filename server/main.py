@@ -294,6 +294,7 @@ async def _extract_stream(
     emit_done: bool = True,
     progress_prefix: str = "",
     log_token_metrics: bool = True,
+    batch_progress: dict[str, Any] | None = None,
 ) -> AsyncIterator[str]:
     backend_log_lines: list[str] = []
     backend_log_capture = _TeeLogCapture(sys.__stdout__)
@@ -429,6 +430,8 @@ async def _extract_stream(
                 "backend_log_text": backend_log_text,
                 "backend_log_lines": backend_log_lines,
             }
+            if batch_progress is not None:
+                final_payload["batch_progress"] = batch_progress
             yield _sse("result", final_payload)
             yield _sse("log", {"tone": "success", "status": prefixed_status("Database insert confirmation returned"), "message": "Database insert confirmation returned to client."})
             if emit_done:
@@ -513,6 +516,7 @@ async def _extract_batch_stream(files: list[UploadFile], request: ExtractionRequ
             emit_done=False,
             progress_prefix=progress_prefix,
             log_token_metrics=False,
+            batch_progress={"current": index, "total": total_files, "file_name": file_name},
         ):
             yield event
         yield _sse("log", {"tone": "success", "status": f"{progress_prefix}Completed file", "message": f"{progress_prefix}Completed {file_name}.", "batch_id": batch_id, "file_name": file_name})
@@ -521,8 +525,8 @@ async def _extract_batch_stream(files: list[UploadFile], request: ExtractionRequ
     batch_metrics = combine_token_cost_metrics(batch_token_metrics)
     log_token_cost_metrics(batch_metrics, title="BEXTRACT MASTER BATCH LEDGER")
     export_info = _write_batch_exports(batch_id, batch_records)
-    yield _sse("batch_export", {"ok": True, "status": "exports_ready", "exports": export_info, "records": batch_records, "token_cost_metrics": batch_metrics})
-    yield _sse("log", {"tone": "success", "status": "Batch exports ready", "message": f"Compiled {len(batch_records)} row(s) into CSV and JSON batch exports.", "exports": export_info})
+    yield _sse("batch_export", {"ok": True, "status": "exports_ready", "exports": export_info, "records": batch_records, "token_cost_metrics": batch_metrics, "message": f"Extraction completed successfully for {total_files}/{total_files} file(s). Compiled {len(batch_records)} row(s) into CSV and JSON batch exports."})
+    yield _sse("log", {"tone": "success", "status": "Batch extraction complete", "message": f"Extraction completed successfully for {total_files}/{total_files} file(s). Compiled {len(batch_records)} row(s) into CSV and JSON batch exports.", "exports": export_info})
     yield _sse("done", {"ok": True, "status": "done", "batch_id": batch_id, "exports": export_info, "token_cost_metrics": batch_metrics})
 
 
