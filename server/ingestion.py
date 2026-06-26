@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
 import re
-import traceback
 
 import google.generativeai as genai
 
@@ -111,6 +110,25 @@ def vector_literal(embedding: list[float]) -> str:
     return "[" + ",".join(str(value) for value in embedding) + "]"
 
 
+async def ensure_extraction_result_record(client, extraction_id: str, *, file_name: str | None = None) -> None:
+    """Ensure chunk inserts have a parent ExtractionResult row to satisfy FK constraints."""
+
+    safe_file_name = file_name or f"{extraction_id}.pdf"
+    await client.execute_raw(
+        """
+        INSERT INTO "ExtractionResult" (
+            "id", "documentId", "fileName", "data", "status", "createdAt", "updatedAt"
+        )
+        VALUES ($1, $2, $3, $4::jsonb, 'indexing', NOW(), NOW())
+        ON CONFLICT ("id") DO NOTHING
+        """,
+        extraction_id,
+        extraction_id,
+        safe_file_name,
+        json.dumps({"status": "indexing", "document_id": extraction_id}),
+    )
+
+
 async def persist_document_chunks(chunks: list[DocumentChunk]) -> None:
     """Persist parsed chunks and dense vectors into Neon PostgreSQL via Prisma raw SQL."""
 
@@ -122,30 +140,27 @@ async def persist_document_chunks(chunks: list[DocumentChunk]) -> None:
     client = Prisma()
     await client.connect()
     try:
+        extraction_ids = {chunk.document_id for chunk in chunks}
+        for extraction_id in extraction_ids:
+            await ensure_extraction_result_record(client, extraction_id)
+
         for chunk in chunks:
             embedding = generate_embedding(chunk.content)
-            print(f"DEBUG: Vector length before insert is {len(embedding)}")
-            raw_sql = f'''
+            await client.execute_raw(
+                f'''
                 INSERT INTO "DocumentChunk" ("id", "extraction_id", "chunk_text", "embedding", "metadata")
                 VALUES ($1, $2, $3, $4::vector({EMBEDDING_DIMENSION}), $5::jsonb)
                 ON CONFLICT ("id") DO UPDATE SET
                     "chunk_text" = EXCLUDED."chunk_text",
                     "embedding" = EXCLUDED."embedding",
                     "metadata" = EXCLUDED."metadata"
-                '''
-            try:
-                await client.execute_raw(
-                    raw_sql,
-                    chunk.chunk_id,
-                    chunk.document_id,
-                    chunk.content,
-                    vector_literal(embedding),
-                    json.dumps({"chunk_type": chunk.chunk_type, **chunk.metadata}),
-                )
-            except Exception:
-                print(f"DEBUG: Raw SQL attempted:\n{raw_sql}")
-                traceback.print_exc()
-                raise
+                ''',
+                chunk.chunk_id,
+                chunk.document_id,
+                chunk.content,
+                vector_literal(embedding),
+                json.dumps({"chunk_type": chunk.chunk_type, **chunk.metadata}),
+            )
     finally:
         await client.disconnect()
 

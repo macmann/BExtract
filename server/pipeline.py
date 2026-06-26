@@ -165,23 +165,48 @@ async def save_extraction_results(template_id: str, results: dict[str, Any]) -> 
         client = prisma_module.Prisma()
         await client.connect()
         try:
-            record = await client.extractionresult.create(
-                data={
-                    "documentId": str(
-                        results.get("document_id")
-                        or results.get("documentId")
-                        or template_id
-                        or "uploaded_document"
-                    ),
-                    "fileName": str(results.get("file_name") or results.get("fileName") or "uploaded.pdf"),
-                    "rawText": results.get("raw_text") or results.get("rawText"),
-                    "data": results,
-                    "confidence": results.get("confidence") if isinstance(results.get("confidence"), (int, float)) else None,
-                    "status": str(results.get("status") or "validated"),
-                    "templateId": template_id or None,
-                }
+            document_id = str(
+                results.get("document_id")
+                or results.get("documentId")
+                or template_id
+                or "uploaded_document"
             )
-            return {"status": "committed", "backend": "prisma", "record_id": getattr(record, "id", None)}
+            file_name = str(results.get("file_name") or results.get("fileName") or "uploaded.pdf")
+            raw_text = results.get("raw_text") or results.get("rawText")
+            confidence = results.get("confidence") if isinstance(results.get("confidence"), (int, float)) else None
+            status = str(results.get("status") or "validated")
+
+            await client.execute_raw(
+                """
+                INSERT INTO "ExtractionResult" (
+                    "id", "documentId", "fileName", "rawText", "data",
+                    "confidence", "status", "templateId", "createdAt", "updatedAt"
+                )
+                VALUES (
+                    $1, $2, $3, $4, $5::jsonb, $6, $7,
+                    (SELECT "id" FROM "DocumentTemplate" WHERE "id" = $8),
+                    NOW(), NOW()
+                )
+                ON CONFLICT ("id") DO UPDATE SET
+                    "documentId" = EXCLUDED."documentId",
+                    "fileName" = EXCLUDED."fileName",
+                    "rawText" = EXCLUDED."rawText",
+                    "data" = EXCLUDED."data",
+                    "confidence" = EXCLUDED."confidence",
+                    "status" = EXCLUDED."status",
+                    "templateId" = EXCLUDED."templateId",
+                    "updatedAt" = NOW()
+                """,
+                document_id,
+                document_id,
+                file_name,
+                raw_text,
+                json.dumps(results),
+                confidence,
+                status,
+                template_id or None,
+            )
+            return {"status": "committed", "backend": "prisma", "record_id": document_id}
         finally:
             await client.disconnect()
     except Exception as exc:
