@@ -149,3 +149,53 @@ def test_log_graph_token_audit_ledger_prints_rows(capsys):
     assert "24,850" in captured
     assert "120" in captured
     assert "$0.0384" in captured
+
+
+def test_stateless_callback_keeps_only_current_user_turn():
+    from google.adk.models.llm_request import LlmRequest
+    from google.genai import types
+
+    from server.pipeline import _reset_llm_request_to_stateless_turn
+
+    request = LlmRequest(
+        contents=[
+            types.Content(role="user", parts=[types.Part(text="old extraction input")]),
+            types.Content(role="model", parts=[types.Part(text="old extraction output")]),
+            types.Content(role="user", parts=[types.Part(text="current extraction input")]),
+        ],
+        previous_interaction_id="leaky-provider-history",
+    )
+
+    result = _reset_llm_request_to_stateless_turn(None, request)
+
+    assert result is None
+    assert request.previous_interaction_id is None
+    assert len(request.contents) == 1
+    assert request.contents[0].parts[0].text == "current extraction input"
+
+
+def test_extractor_and_critic_agents_disable_adk_history_inclusion():
+    from server.pipeline import critic_agent, scalar_extractor, tabular_extractor
+
+    assert scalar_extractor.include_contents == "none"
+    assert tabular_extractor.include_contents == "none"
+    assert critic_agent.include_contents == "none"
+
+
+def test_collect_item_parses_and_removes_raw_agent_output_from_state():
+    from server.pipeline import _make_collect_item
+
+    ctx = DummyContext(
+        {
+            "extract_assets_output": '{"item_id":"assets","value":123}',
+            "current_item": {"item_id": "assets"},
+            "extraction_results": {},
+        }
+    )
+
+    output = _make_collect_item("assets", "extract_assets_output")(ctx)
+
+    assert output["result"]["value"] == 123
+    assert ctx.state["extraction_results"]["assets"]["value"] == 123
+    assert "extract_assets_output" not in ctx.state
+    assert "current_item" not in ctx.state

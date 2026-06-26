@@ -20,6 +20,29 @@ from server.custom_tools import search_tool
 INPUT_RATE_PER_MILLION = 1.50
 OUTPUT_RATE_PER_MILLION = 9.00
 
+def _reset_llm_request_to_stateless_turn(_ctx, llm_request) -> None:
+    """Strip ADK chat history before each model call.
+
+    The dynamic workflow invokes extractor agents once per template item. ADK
+    sessions can otherwise include prior node turns in ``llm_request.contents``,
+    causing prompt tokens to grow with every extraction. Keep only the newest
+    content payload for the current node and sever any provider-side previous
+    interaction pointer. Returning ``None`` lets ADK continue with the sanitized
+    request.
+    """
+
+    llm_request.previous_interaction_id = None
+    if not llm_request.contents:
+        return None
+
+    latest_user_content = next(
+        (content for content in reversed(llm_request.contents) if getattr(content, "role", None) == "user"),
+        llm_request.contents[-1],
+    )
+    llm_request.contents = [latest_user_content]
+    return None
+
+
 scalar_extractor = LlmAgent(
     name="scalar_extractor",
     model="gemini-3.5-flash",
@@ -33,6 +56,8 @@ scalar_extractor = LlmAgent(
     ),
     tools=[search_tool],
     mode="single_turn",
+    include_contents="none",
+    before_model_callback=_reset_llm_request_to_stateless_turn,
 )
 
 
@@ -49,6 +74,8 @@ tabular_extractor = LlmAgent(
     ),
     tools=[search_tool],
     mode="single_turn",
+    include_contents="none",
+    before_model_callback=_reset_llm_request_to_stateless_turn,
 )
 
 
@@ -66,6 +93,8 @@ critic_agent = LlmAgent(
         "actionable critique for that item."
     ),
     mode="single_turn",
+    include_contents="none",
+    before_model_callback=_reset_llm_request_to_stateless_turn,
     output_key="critic_output",
 )
 
@@ -375,8 +404,10 @@ def _make_prepare_item(item: dict[str, Any], item_id: str):
 def _make_collect_item(item_id: str, output_key: str):
     def collect_item(ctx) -> dict[str, Any]:
         results = dict(ctx.state.get("extraction_results", {}))
-        results[item_id] = ctx.state.get(output_key)
+        raw_result = ctx.state.pop(output_key, None)
+        results[item_id] = _parse_result_payload(raw_result)
         ctx.state["extraction_results"] = results
+        ctx.state.pop("current_item", None)
         return {"item_id": item_id, "result": results[item_id]}
 
     collect_item.__name__ = _safe_node_name("collect", item_id)
