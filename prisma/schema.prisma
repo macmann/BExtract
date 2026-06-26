@@ -1,0 +1,32 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model DocumentTemplate {
+  id          String             @id @default(cuid())
+  name        String
+  description String?
+  config      Json
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+  results     ExtractionResult[]
+}
+
+model ExtractionResult {
+  id          String           @id @default(cuid())
+  documentId  String
+  fileName    String
+  rawText     String?
+  data        Json
+  confidence  Float?
+  status      String           @default("pending")
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  templateId  String?
+  template    DocumentTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+}

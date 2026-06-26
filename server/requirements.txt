@@ -1,0 +1,5 @@
+fastapi
+google-adk
+rank_bm25
+pydantic
+uvicorn

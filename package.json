@@ -1,0 +1,12 @@
+{
+  "name": "bextractor",
+  "version": "0.1.0",
+  "private": true,
+  "devDependencies": {
+    "prisma": "latest"
+  },
+  "scripts": {
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev"
+  }
+}
