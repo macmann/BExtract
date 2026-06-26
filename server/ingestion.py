@@ -24,7 +24,7 @@ class DocumentChunk:
 
 
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
-EMBEDDING_MODEL = "models/text-embedding-004"
+EMBEDDING_MODEL = "models/gemini-embedding-001"
 
 
 def tokenize(text: str) -> list[str]:
@@ -95,7 +95,7 @@ def configure_google_embeddings() -> None:
 
 
 def generate_embedding(text: str) -> list[float]:
-    """Generate a 768-dimensional embedding with Google's text-embedding-004 model."""
+    """Generate a 768-dimensional embedding with Google's gemini-embedding-001 model."""
 
     configure_google_embeddings()
     response = genai.embed_content(model=EMBEDDING_MODEL, content=text, task_type="retrieval_document")
