@@ -1066,6 +1066,26 @@ export default function Home() {
     );
   };
 
+  const handleFileChange = (nextFile: File | null) => {
+    abortControllerRef.current?.abort();
+    setFile(nextFile);
+    setIsLoading(false);
+    setExtractionResults([]);
+    setTokenCostMetrics(null);
+    setBackendLogText("");
+    setDebugLogText("");
+    setIsCostMetricsOpen(false);
+    setRuntimeLogs([
+      {
+        time: timestamp(),
+        tone: nextFile ? "info" : "warn",
+        text: nextFile
+          ? `Selected ${nextFile.name}. Run extraction to generate fresh results.`
+          : "PDF selection cleared. Upload a PDF before starting extraction.",
+      },
+    ]);
+  };
+
   const handleCancelExtraction = () => {
     abortControllerRef.current?.abort();
     setIsLoading(false);
@@ -1211,7 +1231,7 @@ export default function Home() {
               Enable debugging panel
             </label>
           </div>
-          <UploadDropzone file={file} onFileChange={setFile} />
+          <UploadDropzone file={file} onFileChange={handleFileChange} />
           <ExtractionLoadingPanel
             logs={runtimeLogs}
             isLoading={isLoading}
