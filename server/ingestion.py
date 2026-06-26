@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
 import re
+import traceback
 
 import google.generativeai as genai
 
@@ -123,21 +124,28 @@ async def persist_document_chunks(chunks: list[DocumentChunk]) -> None:
     try:
         for chunk in chunks:
             embedding = generate_embedding(chunk.content)
-            await client.execute_raw(
-                f'''
+            print(f"DEBUG: Vector length before insert is {len(embedding)}")
+            raw_sql = f'''
                 INSERT INTO "DocumentChunk" ("id", "extraction_id", "chunk_text", "embedding", "metadata")
                 VALUES ($1, $2, $3, $4::vector({EMBEDDING_DIMENSION}), $5::jsonb)
                 ON CONFLICT ("id") DO UPDATE SET
                     "chunk_text" = EXCLUDED."chunk_text",
                     "embedding" = EXCLUDED."embedding",
                     "metadata" = EXCLUDED."metadata"
-                ''',
-                chunk.chunk_id,
-                chunk.document_id,
-                chunk.content,
-                vector_literal(embedding),
-                json.dumps({"chunk_type": chunk.chunk_type, **chunk.metadata}),
-            )
+                '''
+            try:
+                await client.execute_raw(
+                    raw_sql,
+                    chunk.chunk_id,
+                    chunk.document_id,
+                    chunk.content,
+                    vector_literal(embedding),
+                    json.dumps({"chunk_type": chunk.chunk_type, **chunk.metadata}),
+                )
+            except Exception:
+                print(f"DEBUG: Raw SQL attempted:\n{raw_sql}")
+                traceback.print_exc()
+                raise
     finally:
         await client.disconnect()
 

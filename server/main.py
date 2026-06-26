@@ -28,6 +28,30 @@ app = FastAPI(title="BExtractor API")
 CLIENT_OUT_DIR = (Path(__file__).resolve().parent / ".." / "client" / "out").resolve()
 
 
+async def log_document_chunk_embedding_column_type() -> None:
+    """Print the physical PostgreSQL type for DocumentChunk.embedding at startup."""
+
+    from prisma import Prisma
+
+    raw_sql = """
+        SELECT data_type, character_maximum_length, udt_name
+        FROM information_schema.columns
+        WHERE table_name = 'DocumentChunk' AND column_name = 'embedding';
+    """
+    client = Prisma()
+    await client.connect()
+    try:
+        rows = await client.query_raw(raw_sql)
+        print(f"DEBUG: DocumentChunk.embedding physical column type: {rows}")
+    finally:
+        await client.disconnect()
+
+
+@app.on_event("startup")
+async def startup_database_introspection() -> None:
+    await log_document_chunk_embedding_column_type()
+
+
 def _sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
