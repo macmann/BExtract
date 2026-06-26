@@ -390,15 +390,15 @@ function ExtractionLoadingPanel({
             <X className="h-4 w-4" /> Cancel
           </button>
         </div>
-        <div className="grid min-w-0 items-center gap-5 xl:grid-cols-[auto_minmax(0,1fr)]">
-          <div className="flex min-w-0 flex-col items-center text-center">
+        <div className="grid min-w-0 items-center gap-5 xl:grid-cols-[320px_minmax(0,1fr)]">
+          <div className="flex min-w-0 flex-col items-center overflow-hidden text-center">
             <BExtractorLogo isActive={isLoading} />
             <p className="mt-3 text-xs font-black uppercase tracking-[0.28em] text-cyan-200">
               BExtractor Active
             </p>
-            <div className="mt-2 flex items-center gap-2 text-xs text-slate-400">
-              <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-300 shadow-[0_0_12px_rgba(110,231,183,0.9)]" />
-              <span className="line-clamp-1">{activeLog}</span>
+            <div className="mt-2 flex w-full min-w-0 items-center justify-center gap-2 text-xs text-slate-400">
+              <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-emerald-300 shadow-[0_0_12px_rgba(110,231,183,0.9)]" />
+              <span className="min-w-0 max-w-full truncate">{activeLog}</span>
             </div>
           </div>
           <LogsPanel
@@ -432,7 +432,7 @@ function LogsPanel({
 
   return (
     <section
-      className={`min-w-0 flex flex-col rounded-2xl border border-slate-700 bg-slate-950/80 shadow-2xl shadow-black/30 ${compact ? "h-[22rem] w-full" : "h-80 w-full"}`}
+      className={`min-w-0 flex flex-col rounded-2xl border border-slate-700 bg-slate-950/80 shadow-2xl shadow-black/30 ${compact ? "h-[22rem] w-full xl:w-[508px]" : "h-80 w-full"}`}
     >
       <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-800 bg-slate-950/95 px-4 py-3 backdrop-blur">
         <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
