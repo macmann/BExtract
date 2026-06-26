@@ -174,6 +174,36 @@ def test_stateless_callback_keeps_only_current_user_turn():
     assert request.contents[0].parts[0].text == "current extraction input"
 
 
+def test_stateless_callback_preserves_tool_continuation_turns():
+    from google.adk.models.llm_request import LlmRequest
+    from google.genai import types
+
+    from server.pipeline import _reset_llm_request_to_stateless_turn
+
+    request = LlmRequest(
+        contents=[
+            types.Content(role="user", parts=[types.Part(text="current extraction input")]),
+            types.Content(
+                role="model",
+                parts=[types.Part.from_function_call(name="document_hybrid_search", args={"field_name": "Entity Name"})],
+            ),
+            types.Content(
+                role="tool",
+                parts=[types.Part.from_function_response(name="document_hybrid_search", response={"result": "AEON"})],
+            ),
+        ],
+        previous_interaction_id="active-tool-turn",
+    )
+
+    result = _reset_llm_request_to_stateless_turn(callback_context=None, llm_request=request)
+
+    assert result is None
+    assert request.previous_interaction_id == "active-tool-turn"
+    assert len(request.contents) == 3
+    assert request.contents[1].parts[0].function_call.name == "document_hybrid_search"
+    assert request.contents[2].parts[0].function_response.name == "document_hybrid_search"
+
+
 def test_extractor_and_critic_agents_disable_adk_history_inclusion():
     from server.pipeline import critic_agent, scalar_extractor, tabular_extractor
 
