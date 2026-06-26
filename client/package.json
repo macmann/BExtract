@@ -5,8 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
-    "lint": "next lint"
+    "start": "node serve-static.js",
+    "lint": "eslint ."
   },
   "dependencies": {
     "@tailwindcss/postcss": "latest",
