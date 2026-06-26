@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 
 import google.generativeai as genai
 from google.adk.tools import FunctionTool
@@ -11,7 +12,24 @@ from rank_bm25 import BM25Okapi
 from server.ingestion import EMBEDDING_DIMENSION, EMBEDDING_MODEL, configure_google_embeddings, tokenize, vector_literal
 
 
-async def _fetch_dense_matches(query_embedding: list[float]) -> list[dict[str, object]]:
+_current_document_id: ContextVar[str | None] = ContextVar("bextract_current_document_id", default=None)
+
+
+def set_current_document_id(document_id: str | None):
+    """Scope retrieval tools to the document currently being extracted."""
+
+    return _current_document_id.set(document_id)
+
+
+def reset_current_document_id(token) -> None:
+    """Restore the previous retrieval document scope."""
+
+    _current_document_id.reset(token)
+
+
+async def _fetch_dense_matches(
+    query_embedding: list[float], document_id: str | None
+) -> list[dict[str, object]]:
     """Return the 10 nearest pgvector chunks by cosine distance."""
 
     from prisma import Prisma
@@ -19,21 +37,34 @@ async def _fetch_dense_matches(query_embedding: list[float]) -> list[dict[str, o
     client = Prisma()
     await client.connect()
     try:
-        rows = await client.query_raw(
-            f'''
-            SELECT "id", "chunk_text", "metadata", "embedding" <=> $1::vector({EMBEDDING_DIMENSION}) AS distance
-            FROM "DocumentChunk"
-            ORDER BY "embedding" <=> $1::vector({EMBEDDING_DIMENSION})
-            LIMIT 10
-            ''',
-            vector_literal(query_embedding),
-        )
+        if document_id:
+            rows = await client.query_raw(
+                f'''
+                SELECT "id", "chunk_text", "metadata", "embedding" <=> $1::vector({EMBEDDING_DIMENSION}) AS distance
+                FROM "DocumentChunk"
+                WHERE "extraction_id" = $2
+                ORDER BY "embedding" <=> $1::vector({EMBEDDING_DIMENSION})
+                LIMIT 10
+                ''',
+                vector_literal(query_embedding),
+                document_id,
+            )
+        else:
+            rows = await client.query_raw(
+                f'''
+                SELECT "id", "chunk_text", "metadata", "embedding" <=> $1::vector({EMBEDDING_DIMENSION}) AS distance
+                FROM "DocumentChunk"
+                ORDER BY "embedding" <=> $1::vector({EMBEDDING_DIMENSION})
+                LIMIT 10
+                ''',
+                vector_literal(query_embedding),
+            )
         return [dict(row) for row in rows]
     finally:
         await client.disconnect()
 
 
-async def _fetch_all_chunks() -> list[dict[str, object]]:
+async def _fetch_all_chunks(document_id: str | None) -> list[dict[str, object]]:
     """Load text chunks for sparse BM25 ranking."""
 
     from prisma import Prisma
@@ -41,7 +72,13 @@ async def _fetch_all_chunks() -> list[dict[str, object]]:
     client = Prisma()
     await client.connect()
     try:
-        rows = await client.query_raw('SELECT "id", "chunk_text", "metadata" FROM "DocumentChunk"')
+        if document_id:
+            rows = await client.query_raw(
+                'SELECT "id", "chunk_text", "metadata" FROM "DocumentChunk" WHERE "extraction_id" = $1',
+                document_id,
+            )
+        else:
+            rows = await client.query_raw('SELECT "id", "chunk_text", "metadata" FROM "DocumentChunk"')
         return [dict(row) for row in rows]
     finally:
         await client.disconnect()
@@ -80,7 +117,11 @@ async def _document_hybrid_search(field_name: str, definition: str) -> str:
     query = f"{field_name} {definition}".strip()
     query_embedding = _query_embedding(query)
 
-    dense_matches, all_chunks = await asyncio.gather(_fetch_dense_matches(query_embedding), _fetch_all_chunks())
+    document_id = _current_document_id.get()
+    dense_matches, all_chunks = await asyncio.gather(
+        _fetch_dense_matches(query_embedding, document_id),
+        _fetch_all_chunks(document_id),
+    )
     sparse_matches = _sparse_bm25_matches(query, all_chunks)
 
     chunks_by_id = {str(chunk.get("id")): chunk for chunk in all_chunks}

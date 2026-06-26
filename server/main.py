@@ -19,6 +19,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from server.ingestion import ingest_document
+from server.custom_tools import reset_current_document_id, set_current_document_id
 from server.pipeline import (
     build_dynamic_graph,
     calculate_token_cost_metrics,
@@ -322,7 +323,11 @@ async def _extract_stream(upload: UploadFile, template_payload: dict[str, Any]) 
                 }
 
             yield _sse("log", {"tone": "info", "status": "Executing ADK workflow graph", "message": remember_log("Executing ADK workflow graph and critic validation.")})
-            workflow_output = await _run_adk_workflow(graph, {"template_payload": template_payload})
+            retrieval_scope_token = set_current_document_id(document_id)
+            try:
+                workflow_output = await _run_adk_workflow(graph, {"template_payload": template_payload})
+            finally:
+                reset_current_document_id(retrieval_scope_token)
             normalized_results = normalize_workflow_results(template_payload, workflow_output)
             if normalized_results:
                 extraction_results.update(normalized_results)
