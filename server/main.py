@@ -372,9 +372,23 @@ async def _extract_stream(
 
                 yield _sse("log", {"tone": "info", "status": prefixed_status("Executing ADK workflow graph"), "message": remember_log("Executing ADK workflow graph and critic validation.")})
                 retrieval_scope_token = set_current_document_id(document_id)
+                workflow_task: asyncio.Task[Any] | None = None
                 try:
-                    workflow_output = await _run_adk_workflow(graph, {"template_payload": template_payload})
+                    workflow_task = asyncio.create_task(_run_adk_workflow(graph, {"template_payload": template_payload}))
+                    heartbeat_count = 0
+                    while not workflow_task.done():
+                        try:
+                            await asyncio.wait_for(asyncio.shield(workflow_task), timeout=10.0)
+                        except asyncio.TimeoutError:
+                            heartbeat_count += 1
+                            elapsed_seconds = heartbeat_count * 10
+                            heartbeat_message = f"Executing ADK workflow graph and critic validation. Still running after {elapsed_seconds}s..."
+                            yield _sse("log", {"tone": "info", "status": prefixed_status("Executing ADK workflow graph"), "message": remember_log(heartbeat_message)})
+                            await asyncio.sleep(0)
+                    workflow_output = workflow_task.result()
                 finally:
+                    if workflow_task is not None and not workflow_task.done():
+                        workflow_task.cancel()
                     reset_current_document_id(retrieval_scope_token)
                 normalized_results = normalize_workflow_results(template_payload, workflow_output)
                 if normalized_results:
@@ -568,7 +582,11 @@ async def extract_document(files: List[UploadFile] = File(...), payload: str = F
     return StreamingResponse(
         _extract_batch_stream(files, request_payload),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
