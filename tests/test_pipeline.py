@@ -67,6 +67,32 @@ def test_normalize_workflow_results_matches_keys_case_space_and_underscore_insen
     assert normalized["rating_action"]["confidence"] == 0.93
 
 
+def test_field_complexity_uses_ui_metadata_and_generic_language_not_fixed_names():
+    from server.pipeline import _context_chunk_limit_for_complexity, _field_complexity
+
+    ui_long_text_field = {
+        "name": "Management view",
+        "dataType": "LongText",
+        "definition": "Provide the requested response from the uploaded document.",
+    }
+    generic_summary_field = {
+        "name": "Key considerations",
+        "dataType": "String",
+        "definition": "Summarize the main factors behind the decision.",
+    }
+    scalar_field = {
+        "name": "Published date",
+        "dataType": "Date",
+        "definition": "Extract the publication date.",
+    }
+
+    assert _field_complexity(ui_long_text_field, "Management view") == "narrative"
+    assert _field_complexity(generic_summary_field, "Key considerations") == "narrative"
+    assert _field_complexity(scalar_field, "Published date") == "categorical_scalar"
+    assert _context_chunk_limit_for_complexity("narrative") == 8
+    assert _context_chunk_limit_for_complexity("categorical_scalar") == 3
+
+
 def test_parse_pre_injected_response_accepts_fenced_json_object():
     from server.pipeline import _parse_pre_injected_response
 
