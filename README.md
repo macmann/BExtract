@@ -41,7 +41,7 @@ Neon Serverless PostgreSQL + pgvector
 | Backend | Python, FastAPI, Uvicorn | Single web service that serves the static frontend and handles API/SSE extraction logic. |
 | Agent Orchestration | Google Agent Development Kit (ADK 2.0) | Graph-based multi-agent extraction, critique, retry, and persistence workflow. |
 | Database | Neon Serverless PostgreSQL, Prisma ORM with Python Client | Relational storage for templates, extraction results, chunks, metadata, and vector embeddings. |
-| RAG & Search | `pgvector`, Google `text-embedding-004`, `rank_bm25`, Reciprocal Rank Fusion (RRF) | Hybrid retrieval using dense semantic search and sparse keyword search blended into a ranked context set. |
+| RAG & Search | PyPDF2, `pgvector`, Google `gemini-embedding-001`, `rank_bm25`, Reciprocal Rank Fusion (RRF) | Text-layer PDF extraction, overlapping chunk indexing, and hybrid retrieval using dense semantic search plus sparse keyword search. |
 | Deployment | Render native Python web service | One service builds the frontend, installs backend dependencies, and runs FastAPI. |
 
 ## Key Product Features
@@ -55,9 +55,11 @@ BExtractor supports configurable extraction templates that can contain different
 
 The backend normalizes template payloads and dynamically builds the extraction graph from the configured fields and tables.
 
-### Layout-Aware Parsing
+### PDF Text Extraction and Chunking
 
-Financial and insurance PDFs often contain dense tables, merged headers, multi-page schedules, and repeated row groups. BExtractor is designed to preserve table-like structures as intact retrieval context so the tabular extractor can maintain:
+The current ingestion path uses PyPDF2 before chunking: uploaded PDF bytes are opened with `PdfReader`, text is extracted page-by-page with `page.extract_text()`, and only then is the extracted page text split into overlapping retrieval chunks. This means BExtractor chunks text extracted from the PDF text layer, not raw PDF bytes directly.
+
+Financial and insurance PDFs often contain dense tables, merged headers, multi-page schedules, and repeated row groups. BExtractor preserves the text that PyPDF2 returns as intact retrieval context so the tabular extractor can maintain:
 
 - Row order
 - Column names
@@ -65,7 +67,7 @@ Financial and insurance PDFs often contain dense tables, merged headers, multi-p
 - Source evidence
 - Page and chunk metadata
 
-This prevents common extraction failures where rows are split across unrelated chunks or values are detached from their labels.
+This prevents common extraction failures where rows are split across unrelated chunks or values are detached from their labels. Because the current parser is PyPDF2 text extraction rather than OCR, scanned/image-only PDFs require an embedded text layer or a future OCR preprocessing step before they can produce useful chunks.
 
 ### Agentic Self-Correction
 
@@ -121,7 +123,7 @@ Install the following before running BExtractor locally:
 - **Node.js 20+** recommended for the Next.js frontend.
 - **Python 3.10+** for the FastAPI backend.
 - **PostgreSQL with `pgvector` enabled**, or a Neon Serverless PostgreSQL database with the vector extension available.
-- **Google API key** with access to Gemini models and `text-embedding-004`.
+- **Google API key** with access to Gemini models and `gemini-embedding-001`.
 
 ### Environment Variables
 
@@ -141,7 +143,7 @@ DIRECT_URL="postgresql://USER:PASSWORD@HOST:PORT/DATABASE?sslmode=require"
 
 | Variable | Description |
 | --- | --- |
-| `GOOGLE_API_KEY` | Used by Google Gemini agents and the `text-embedding-004` embedding model. |
+| `GOOGLE_API_KEY` | Used by Google Gemini agents and the `gemini-embedding-001` embedding model. |
 | `DATABASE_URL` | Prisma pooled/runtime connection string for Neon PostgreSQL. |
 | `DIRECT_URL` | Prisma direct connection string used for schema operations such as `db push`. |
 
@@ -230,19 +232,28 @@ DIRECT_URL
 NODE_VERSION=20
 ```
 
+## Latest Documentation Updates
+
+- Clarified that PDF ingestion uses PyPDF2 text extraction before chunking.
+- Clarified that chunking operates on page-level extracted text with overlapping windows, not directly on raw PDF bytes.
+- Updated retrieval documentation to reference the current `gemini-embedding-001` embedding model and 3072-dimensional pgvector storage.
+- Documented the current limitation that image-only PDFs need an embedded text layer or future OCR preprocessing.
+
 ## Data Flow
 
 ```text
 1. User defines scalar and tabular extraction fields in the UI.
 2. User uploads a PDF and starts extraction.
-3. FastAPI reads the upload and ingests document chunks.
-4. Chunks are embedded with Google text-embedding-004 and stored in pgvector.
-5. Extractor agents call the hybrid search tool for relevant context.
-6. Dense vector matches and sparse BM25 matches are fused with RRF.
-7. Scalar and tabular agents produce structured JSON.
-8. The critic agent validates the compiled payload.
-9. Failed items are retried with critique; passing payloads are committed.
-10. The frontend receives real-time SSE logs and the final structured result.
+3. FastAPI reads the upload and passes the PDF bytes to the ingestion pipeline.
+4. PyPDF2 extracts text page-by-page before chunking.
+5. Page text is split into overlapping retrieval chunks.
+6. Chunks are embedded with Google gemini-embedding-001 and stored in pgvector.
+7. Extractor agents call the hybrid search tool for relevant context.
+8. Dense vector matches and sparse BM25 matches are fused with RRF.
+9. Scalar and tabular agents produce structured JSON.
+10. The critic agent validates the compiled payload.
+11. Failed items are retried with critique; passing payloads are committed.
+12. The frontend receives real-time SSE logs and the final structured result.
 ```
 
 ## Development Notes
