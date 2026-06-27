@@ -33,6 +33,7 @@ from server.pipeline import (
     log_token_cost_metrics,
     normalize_workflow_results,
     record_node_token_audit,
+    retry_empty_extraction_results,
     run_pre_injected_extraction,
     workflow_progress,
 )
@@ -395,6 +396,25 @@ async def _extract_stream(
                     extraction_results.update(normalized_results)
                 token_cost_metrics = calculate_token_cost_metrics(workflow_output)
                 node_audit_summary = workflow_output.get("node_audit_summary", []) if isinstance(workflow_output, dict) else []
+                retry_scope_token = set_current_document_id(document_id)
+                try:
+                    async for retry_event in retry_empty_extraction_results(template_payload, extraction_results):
+                        if isinstance(retry_event, str):
+                            yield _sse("log", {"tone": "info", "status": prefixed_status("Verifying empty extraction results"), "message": remember_log(retry_event)})
+                            await asyncio.sleep(0)
+                        else:
+                            retry_results = retry_event.get("results", {})
+                            if retry_results:
+                                extraction_results.update(retry_results)
+                                if isinstance(workflow_output, dict):
+                                    workflow_output.setdefault("empty_result_retry", retry_event)
+                                token_cost_metrics = combine_token_cost_metrics([
+                                    token_cost_metrics,
+                                    retry_event.get("token_cost_metrics"),
+                                ])
+                                node_audit_summary.extend(retry_event.get("node_audit_summary", []))
+                finally:
+                    reset_current_document_id(retry_scope_token)
                 yield _sse("log", {"tone": "success", "status": prefixed_status("Committing structured extraction payload"), "message": remember_log("ADK workflow completed; committing structured extraction payload.")})
             else:
                 yield _sse("log", {"tone": "info", "status": prefixed_status("Executing Pre-Injected RAG pipeline"), "message": remember_log("Executing Pre-Injected RAG pipeline.")})
