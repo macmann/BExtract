@@ -152,3 +152,8 @@ export async function fetchHistoricalRun(runId: string): Promise<HistoricalRun |
   if (!response.ok) throw new Error(`Failed to load result ${runId} (${response.status})`);
   return mapApiRun((await response.json()) as ApiRun);
 }
+
+export async function deleteHistoricalRun(runId: string): Promise<void> {
+  const response = await fetch(`/api/results/${encodeURIComponent(runId)}`, { method: "DELETE" });
+  if (!response.ok) throw new Error(`Failed to delete result ${runId} (${response.status})`);
+}

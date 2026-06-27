@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from datetime import date, datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from prisma import Prisma
 
@@ -208,6 +208,27 @@ async def _logs_stream(run_id: str) -> AsyncIterator[str]:
                 yield "\n\n"
             yield f"===== {file.get('file_name') or file.get('id')} =====\n"
             yield str(file.get("logs") or "")
+    finally:
+        await client.disconnect()
+
+
+@router.delete("/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_result(run_id: str) -> None:
+    """Delete a pipeline run and its cascaded file extraction records."""
+
+    client = Prisma()
+    await client.connect()
+    try:
+        run = await _fetch_run(client, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Pipeline run not found")
+        await client.execute_raw(
+            """
+            DELETE FROM "pipeline_runs"
+            WHERE "id" = $1::uuid
+            """,
+            run_id,
+        )
     finally:
         await client.disconnect()
 
