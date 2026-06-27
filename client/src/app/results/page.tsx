@@ -2,8 +2,8 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { Check, Clipboard, FileSearch, Search } from "lucide-react";
-import { fetchHistoricalRuns, type HistoricalRun, type RunStatus } from "@/lib/results-data";
+import { Check, Clipboard, FileSearch, Search, Trash2 } from "lucide-react";
+import { deleteHistoricalRun, fetchHistoricalRuns, type HistoricalRun, type RunStatus } from "@/lib/results-data";
 
 const statusStyles: Record<RunStatus, string> = {
   success: "border-emerald-400/30 bg-emerald-400/10 text-emerald-200",
@@ -24,6 +24,7 @@ export default function ResultsPage() {
   const [copiedRunId, setCopiedRunId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [deletingRunId, setDeletingRunId] = useState<string | null>(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -49,6 +50,24 @@ export default function ResultsPage() {
     await navigator.clipboard.writeText(runId);
     setCopiedRunId(runId);
     window.setTimeout(() => setCopiedRunId(null), 1400);
+  };
+
+  const deleteRun = async (run: HistoricalRun) => {
+    const shouldDelete = window.confirm(
+      `Delete run ${run.id}? This will permanently remove the run and its file extraction records.`,
+    );
+    if (!shouldDelete) return;
+
+    setDeletingRunId(run.id);
+    setError(null);
+    try {
+      await deleteHistoricalRun(run.id);
+      setRuns((currentRuns) => currentRuns.filter((currentRun) => currentRun.id !== run.id));
+    } catch (deleteError: unknown) {
+      setError(deleteError instanceof Error ? deleteError.message : "Failed to delete result.");
+    } finally {
+      setDeletingRunId(null);
+    }
   };
 
   return (
@@ -83,14 +102,15 @@ export default function ResultsPage() {
                 <th className="px-5 py-4">Files Processed</th>
                 <th className="px-5 py-4">Total Cost</th>
                 <th className="px-5 py-4">Status</th>
+                <th className="px-5 py-4 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800">
               {!isLoading && runs.length === 0 && (
-                <tr><td colSpan={5} className="px-5 py-10 text-center text-slate-400">No extraction runs found.</td></tr>
+                <tr><td colSpan={6} className="px-5 py-10 text-center text-slate-400">No extraction runs found.</td></tr>
               )}
               {isLoading && (
-                <tr><td colSpan={5} className="px-5 py-10 text-center text-slate-400">Loading extraction runs…</td></tr>
+                <tr><td colSpan={6} className="px-5 py-10 text-center text-slate-400">Loading extraction runs…</td></tr>
               )}
               {runs.map((run) => (
                 <tr
@@ -119,6 +139,21 @@ export default function ResultsPage() {
                     <span className={`inline-flex rounded-full border px-3 py-1 text-xs font-bold capitalize ${statusStyles[run.status]}`}>
                       {run.status}
                     </span>
+                  </td>
+                  <td className="px-5 py-5 text-right">
+                    <button
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        void deleteRun(run);
+                      }}
+                      disabled={deletingRunId === run.id}
+                      className="relative z-10 inline-flex items-center gap-2 rounded-lg border border-red-400/30 bg-red-400/10 px-3 py-1.5 text-xs font-bold text-red-100 transition hover:border-red-300 hover:bg-red-400/20 disabled:cursor-not-allowed disabled:opacity-50"
+                      title="Delete this run"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      {deletingRunId === run.id ? "Deleting…" : "Delete"}
+                    </button>
                   </td>
                 </tr>
               ))}
