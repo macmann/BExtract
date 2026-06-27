@@ -790,6 +790,15 @@ def _query_generation_prompt(field: Any) -> str:
         "'summarise', 'format', or 'extract'. Return ONLY the keywords."
     )
 
+
+def _clean_generated_search_query(raw_query: str, fallback_query: str) -> str:
+    """Normalize the query micro-turn output while preserving a safe fallback."""
+
+    cleaned = raw_query.strip().strip('"').strip("'")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned or fallback_query
+
+
 def _pre_injected_prompt(item: dict[str, Any], item_id: str, item_name: str, chunks: str) -> str:
     item_type = str(item.get("type") or item.get("routeType") or "Scalar")
     definition = str(item.get("definition") or item.get("description") or "")
@@ -842,7 +851,36 @@ async def run_pre_injected_extraction(
         definition = str(item.get("definition") or item.get("description") or "")
         yield f"Processing {item_name}"
 
-        chunks = await document_hybrid_search(item_name, definition)
+        query_prompt = _query_generation_prompt(item)
+        query_response = await client.aio.models.generate_content(
+            model=model,
+            contents=query_prompt,
+        )
+        query_response_payload = (
+            query_response.model_dump(mode="json") if hasattr(query_response, "model_dump") else query_response
+        )
+        events.append({"node_name": f"query_transform_{item_id}", "response": query_response_payload})
+        query_usage = _iter_usage_metadata(query_response_payload)
+        usage_entries.extend(query_usage)
+
+        query_input_tokens = sum(input_count for input_count, _ in query_usage)
+        query_output_tokens = sum(output_count for _, output_count in query_usage)
+        node_audit_summary.append(
+            {
+                "node_name": f"query_transform_{item_id}"[:80],
+                "input_tokens": query_input_tokens,
+                "output_tokens": query_output_tokens,
+                "dynamic_context_length": _estimated_context_length(query_prompt),
+                "estimated_cost": _node_cost(query_input_tokens, query_output_tokens),
+            }
+        )
+
+        fallback_query = f"{item_name} {definition}".strip()
+        generated_clean_query = _clean_generated_search_query(
+            getattr(query_response, "text", "") or "",
+            fallback_query,
+        )
+        chunks = await document_hybrid_search(query=generated_clean_query)
         prompt = _pre_injected_prompt(item, item_id, item_name, chunks)
         generation_config = {"response_mime_type": "application/json"}
         response = await client.aio.models.generate_content(

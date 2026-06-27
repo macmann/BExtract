@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -353,3 +354,90 @@ def test_pre_injected_prompt_omits_example_format_section_when_absent():
     )
 
     assert "[EXPECTED FORMAT EXAMPLE]" not in prompt
+
+
+def test_run_pre_injected_extraction_transforms_query_without_example_format(monkeypatch):
+    import server.pipeline as pipeline
+
+    class DummyResponse:
+        def __init__(self, text):
+            self.text = text
+
+        def model_dump(self, mode="json"):
+            return {
+                "text": self.text,
+                "usage_metadata": {
+                    "prompt_token_count": 3,
+                    "candidates_token_count": 2,
+                },
+            }
+
+    class DummyModels:
+        def __init__(self):
+            self.prompts = []
+
+        async def generate_content(self, **kwargs):
+            self.prompts.append(kwargs)
+            if len(self.prompts) == 1:
+                return DummyResponse("final decision keywords")
+            return DummyResponse(
+                json.dumps(
+                    {
+                        "value": "Affirmed",
+                        "unit": None,
+                        "confidence": 0.91,
+                        "evidence": "Retrieved evidence",
+                    }
+                )
+            )
+
+    class DummyClient:
+        models = DummyModels()
+
+    class DummyGenAI:
+        last_client = None
+
+        class Client:
+            def __init__(self, api_key=None):
+                self.aio = DummyClient()
+                DummyGenAI.last_client = self
+
+    search_calls = []
+
+    async def fake_document_hybrid_search(**kwargs):
+        search_calls.append(kwargs)
+        return "Retrieved evidence"
+
+    monkeypatch.setattr(pipeline, "genai", DummyGenAI)
+    monkeypatch.setattr(pipeline, "document_hybrid_search", fake_document_hybrid_search)
+
+    async def collect_events():
+        events = []
+        async for event in pipeline.run_pre_injected_extraction(
+            "doc_1",
+            {
+                "items": [
+                    {
+                        "id": "rating_action",
+                        "name": "Rating Action",
+                        "definition": "Extract and format the final decision.",
+                        "example_format": '{"value":"Affirmed"}',
+                    }
+                ]
+            },
+            log_final_metrics=False,
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(collect_events())
+
+    assert search_calls == [{"query": "final decision keywords"}]
+    query_prompt = DummyGenAI.last_client.aio.models.prompts[0]["contents"]
+    assert "Rating Action" in query_prompt
+    assert "Extract and format the final decision." in query_prompt
+    assert '{"value":"Affirmed"}' not in query_prompt
+    extraction_prompt = DummyGenAI.last_client.aio.models.prompts[1]["contents"]
+    assert "[EXPECTED FORMAT EXAMPLE]" in extraction_prompt
+    assert '{"value":"Affirmed"}' in extraction_prompt
+    assert events[-1]["results"]["rating_action"]["value"] == "Affirmed"
