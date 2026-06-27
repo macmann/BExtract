@@ -113,8 +113,8 @@ def _reciprocal_rank_fusion(rankings: list[list[dict[str, object]]], rank_consta
     return [chunk_id for chunk_id, _ in sorted(fused_scores.items(), key=lambda item: item[1], reverse=True)]
 
 
-async def _document_hybrid_search(field_name: str, definition: str) -> str:
-    query = f"{field_name} {definition}".strip()
+async def _document_hybrid_search(query: str) -> str:
+    query = query.strip()
     query_embedding = _query_embedding(query)
 
     document_id = _current_document_id.get()
@@ -135,10 +135,16 @@ async def _document_hybrid_search(field_name: str, definition: str) -> str:
     return "\n\n".join(str(chunks_by_id[chunk_id].get("chunk_text") or "") for chunk_id in fused_chunk_ids)
 
 
-async def document_hybrid_search(field_name: str, definition: str) -> str:
+async def document_hybrid_search(
+    field_name: str = "",
+    definition: str = "",
+    *,
+    query: str | None = None,
+) -> str:
     """Return the top three chunks using pgvector + BM25 reciprocal rank fusion."""
 
-    return await _document_hybrid_search(field_name, definition)
+    search_query = query if query is not None else f"{field_name} {definition}".strip()
+    return await _document_hybrid_search(search_query)
 
 
 search_tool = FunctionTool(document_hybrid_search)
