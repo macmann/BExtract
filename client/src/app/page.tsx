@@ -803,13 +803,15 @@ function TemplateDrawer({
   onDeleteTemplate: (templateId: string) => void;
   onRunTemplate: (template: SavedTemplate) => void;
   onExportTemplate: (template: SavedTemplate) => void;
-  onImportTemplate: (file: File) => void;
+  onImportTemplate: (file: File, targetTemplate?: SavedTemplate) => void;
   isLoading: boolean;
 }) {
   const [openMenuTemplateId, setOpenMenuTemplateId] = useState<string | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const importTargetTemplateRef = useRef<SavedTemplate | undefined>(undefined);
 
-  const openImportPicker = () => {
+  const openImportPicker = (targetTemplate?: SavedTemplate) => {
+    importTargetTemplateRef.current = targetTemplate;
     setOpenMenuTemplateId(null);
     importInputRef.current?.click();
   };
@@ -852,7 +854,10 @@ function TemplateDrawer({
           accept="application/json,.json"
           onChange={(event: ChangeEvent<HTMLInputElement>) => {
             const selectedFile = event.target.files?.[0];
-            if (selectedFile) onImportTemplate(selectedFile);
+            if (selectedFile) {
+              onImportTemplate(selectedFile, importTargetTemplateRef.current);
+            }
+            importTargetTemplateRef.current = undefined;
             event.target.value = "";
           }}
         />
@@ -903,7 +908,7 @@ function TemplateDrawer({
                   {openMenuTemplateId === template.id && (
                     <div className="absolute right-0 top-8 z-20 w-44 overflow-hidden rounded-xl border border-slate-700 bg-slate-950 shadow-2xl shadow-black/50">
                       <button
-                        onClick={openImportPicker}
+                        onClick={() => openImportPicker(template)}
                         className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-semibold text-slate-200 hover:bg-cyan-300/10 hover:text-cyan-100"
                       >
                         <UploadCloud className="h-3.5 w-3.5" /> Input Template
@@ -1138,27 +1143,27 @@ export default function Home() {
     }));
   };
 
-  const handleImportTemplate = async (file: File) => {
+  const handleImportTemplate = async (file: File, targetTemplate?: SavedTemplate) => {
     try {
       const payload = JSON.parse(await file.text()) as TemplateImportPayload;
       const importedFields = normalizeImportedFields(
         payload.fields ?? payload.items,
       );
       const importedTemplate: SavedTemplate = {
-        id: crypto.randomUUID(),
+        id: targetTemplate?.id ?? activeTemplateId ?? crypto.randomUUID(),
         name:
-          String(payload.name ?? file.name.replace(/\.json$/i, "")).trim() ||
-          "Imported Template",
+          String(
+            payload.name ?? targetTemplate?.name ?? file.name.replace(/\.json$/i, ""),
+          ).trim() || "Imported Template",
         fields: importedFields,
         extractionApproach:
           payload.extractionApproach === "agentic" ? "agentic" : "pre_injected",
         updatedAt: new Date().toISOString(),
       };
 
-      setSavedTemplates((current) => [importedTemplate, ...current]);
       applyTemplate(importedTemplate);
-      appendLog("success", `Imported template "${importedTemplate.name}".`);
-      showToast("success", `Template "${importedTemplate.name}" imported and saved successfully.`);
+      appendLog("success", `Loaded imported template "${importedTemplate.name}" into the editor.`);
+      showToast("success", `Template "${importedTemplate.name}" loaded. Click Save Template to overwrite the selected template.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to import template JSON.";
       appendLog("error", message);
