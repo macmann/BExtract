@@ -16,7 +16,7 @@ The platform is easiest to understand as five connected layers:
 | --- | --- | --- |
 | 1. Experience | Next.js static UI | Template builder, PDF upload, live progress logs, and final extraction review. |
 | 2. API / Orchestration | FastAPI, SSE, ADK workflow runner, optional pre-injected RAG runner | Request handling, workflow construction, progress streaming, token/cost auditing, and result delivery. |
-| 3. Document Intelligence | PDF parsing, chunking, embeddings, hybrid search | Converts documents into retrievable evidence chunks. |
+| 3. Document Intelligence | PyPDF2 PDF text extraction, chunking, embeddings, hybrid search | Converts PDF text-layer content into retrievable evidence chunks. |
 | 4. Agent Runtime | Scalar extractor, tabular extractor, critic agent | Performs extraction, validates the payload, and retries failed items. |
 | 5. Persistence | PostgreSQL, Prisma, `pgvector` | Stores templates, chunks, vectors, raw text, and validated structured JSON. |
 
@@ -74,7 +74,7 @@ The platform is easiest to understand as five connected layers:
 | --- | --- | --- |
 | Browser UI | Next.js static export | Template configuration, PDF upload, execution monitoring, and rendered extraction output. |
 | API server | FastAPI | Serves static UI, receives extraction requests, streams SSE logs, invokes ingestion, executes ADK workflow, and returns final JSON. |
-| PDF ingestion | `server/ingestion.py` | Extracts text page-by-page, creates overlapping chunks, generates embeddings, and writes chunks to `DocumentChunk`. |
+| PDF ingestion | `server/ingestion.py` with PyPDF2 | Opens uploaded PDF bytes with `PdfReader`, extracts page text with `page.extract_text()`, creates overlapping chunks, generates embeddings, and writes chunks to `DocumentChunk`. |
 | Vector database | PostgreSQL with `pgvector` | Stores chunk text, metadata, and 3072-dimensional embeddings for semantic retrieval. |
 | Relational data store | PostgreSQL + Prisma | Stores templates, extraction results, raw text, chunk metadata, and final structured JSON. |
 | Hybrid search tool | `server/custom_tools.py` | Combines dense vector search, BM25 sparse search, and Reciprocal Rank Fusion. |
@@ -85,7 +85,7 @@ The platform is easiest to understand as five connected layers:
 
 ## End-to-End Extraction Flow
 
-The extraction run has two major phases: **index the uploaded PDF**, then **run extraction against the indexed evidence**. The default `agentic` approach uses the dynamic Google ADK workflow. A second pre-injected RAG approach can run stateless per-field Gemini calls after hybrid retrieval has selected the evidence chunks.
+The extraction run has two major phases: **index the uploaded PDF**, then **run extraction against the indexed evidence**. Indexing currently starts with PyPDF2 text-layer extraction before chunking; the system does not chunk raw PDF bytes directly. The default `agentic` approach uses the dynamic Google ADK workflow. A second pre-injected RAG approach can run stateless per-field Gemini calls after hybrid retrieval has selected the evidence chunks.
 
 ```text
 PHASE 1 - INDEX THE DOCUMENT
@@ -104,13 +104,14 @@ FastAPI
   v
 PDF ingestion pipeline
   |
-  | 4. Extract text per page with PyPDF2
-  | 5. Split page text into overlapping chunks
-  | 6. Generate document embedding for each chunk
+  | 4. Open PDF bytes with PyPDF2 PdfReader
+  | 5. Extract text per page with page.extract_text()
+  | 6. Split extracted page text into overlapping chunks
+  | 7. Generate document embedding for each chunk
   v
 PostgreSQL + pgvector
   |
-  | 7. Store DocumentChunk rows:
+  | 8. Store DocumentChunk rows:
   |    - chunk_text
   |    - metadata
   |    - embedding vector(3072)
@@ -168,6 +169,13 @@ Next.js UI
 User reviews structured extraction output
 ```
 
+## Latest Architecture Updates
+
+- PDF ingestion is now documented as a two-step text-first path: PyPDF2 extracts page text, then the chunker splits that extracted text.
+- The architecture diagrams and pipeline tables now make clear that raw PDF bytes are not chunked directly.
+- The current embedding/indexing path is documented as 3072-dimensional `gemini-embedding-001` vectors stored in PostgreSQL with `pgvector`.
+- Current limitation: PyPDF2 does not provide OCR for scanned/image-only PDFs; those files need an embedded text layer or an OCR preprocessing enhancement.
+
 ## Document Processing Pipeline
 
 The document processing pipeline has clear subsystem ownership. Each step transforms the document into a more structured or more retrievable representation.
@@ -176,8 +184,8 @@ The document processing pipeline has clear subsystem ownership. Each step transf
 | ---: | --- | --- | --- | --- |
 | 1 | Next.js UI | User-defined fields/tables and PDF | Multipart form payload | Keeps extraction schema dynamic and user-configurable. |
 | 2 | FastAPI | Multipart form payload | `document_id`, `file_name`, uploaded bytes | Establishes the extraction run identity. |
-| 3 | PDF ingestion | PDF bytes | Page-level text | Converts source file into machine-readable text. |
-| 4 | Chunker | Page text | Overlapping text chunks | Preserves local context while keeping retrieval units small. |
+| 3 | PDF ingestion | PDF bytes | Page-level text extracted by PyPDF2 | Converts the PDF text layer into machine-readable text before any chunking occurs. |
+| 4 | Chunker | Extracted page text | Overlapping text chunks | Preserves local context while keeping retrieval units small; raw PDF bytes are not chunked directly. |
 | 5 | Embedding generator | Chunk text | 3072-dimensional vector | Enables semantic search over document evidence. |
 | 6 | Prisma/raw SQL | Chunk text, metadata, vector | `DocumentChunk` rows | Persists source evidence for search and traceability. |
 | 7 | Runtime selector | Template JSON and `approach` / `extractionApproach` | ADK workflow nodes or pre-injected per-field prompts | Creates one extraction path per requested field/table. |
@@ -191,7 +199,7 @@ The document processing pipeline has clear subsystem ownership. Each step transf
 [Template JSON] -----------------------------+
                                              |
                                              v
-[PDF Upload] --> [FastAPI /api/extract] --> [PDF Text Extraction]
+[PDF Upload] --> [FastAPI /api/extract] --> [PyPDF2 Page Text Extraction]
                                              |
                                              v
                                       [Chunk Text]
@@ -464,7 +472,7 @@ BExtract/
 ## Extraction Walkthrough
 
 1. **Template creation**: The UI sends fields/tables as JSON. Each item includes a name, type, definition, and optional data type.
-2. **PDF ingestion**: The backend reads the uploaded PDF, extracts page text, and splits each page into overlapping chunks.
+2. **PDF ingestion**: The backend reads the uploaded PDF, uses PyPDF2 to extract page text from the PDF text layer, and splits each page of extracted text into overlapping chunks.
 3. **Embedding and indexing**: Each chunk is embedded with Google's embedding model and stored in PostgreSQL with `pgvector`.
 4. **Workflow construction**: The backend creates a Google ADK workflow. For each template item, it adds prepare, extractor, and collect nodes.
 5. **Context retrieval**: Each extractor calls `document_hybrid_search` with the item name and definition.
