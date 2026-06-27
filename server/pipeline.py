@@ -22,82 +22,17 @@ from server.custom_tools import document_hybrid_search, search_tool
 INPUT_RATE_PER_MILLION = 1.50
 OUTPUT_RATE_PER_MILLION = 9.00
 
+NARRATIVE_FIELD_NAMES = {
+    "rating action basis",
+    "rating drivers",
+    "rating triggers",
+}
 NARRATIVE_CONTEXT_CHUNK_LIMIT = 8
 SCALAR_CONTEXT_CHUNK_LIMIT = 3
 
-NARRATIVE_UI_TYPE_MARKERS = (
-    "longtext",
-    "textarea",
-    "multiline",
-    "paragraph",
-    "markdown",
-    "richtext",
-    "narrative",
-    "summary",
-    "freeform",
-)
-SCALAR_UI_TYPE_MARKERS = (
-    "date",
-    "datetime",
-    "number",
-    "integer",
-    "float",
-    "decimal",
-    "currency",
-    "percentage",
-    "percent",
-    "boolean",
-    "select",
-    "dropdown",
-    "enum",
-    "rating",
-)
-NARRATIVE_TEXT_MARKERS = (
-    "summar",
-    "describe",
-    "explain",
-    "discuss",
-    "outline",
-    "basis",
-    "rationale",
-    "reason",
-    "driver",
-    "trigger",
-    "factor",
-    "consideration",
-    "commentary",
-    "assessment",
-    "analysis",
-    "strength",
-    "weakness",
-    "mitigant",
-    "outlook",
-)
-
 
 def _field_complexity(item: dict[str, Any], item_name: str) -> str:
-    """Classify UI-defined fields without relying on hard-coded field names."""
-
-    ui_metadata = " ".join(
-        str(item.get(key) or "")
-        for key in (
-            "type",
-            "routeType",
-            "dataType",
-            "data_type",
-            "inputType",
-            "input_type",
-            "component",
-            "widget",
-            "format",
-        )
-    ).lower()
-    normalized_ui_metadata = _normalize_match_key(ui_metadata)
-
-    if any(marker in normalized_ui_metadata for marker in NARRATIVE_UI_TYPE_MARKERS):
-        return "narrative"
-    if any(marker in normalized_ui_metadata for marker in SCALAR_UI_TYPE_MARKERS):
-        return "categorical_scalar"
+    """Classify fields so narrative summaries receive a wider RAG window."""
 
     candidate_text = " ".join(
         str(value or "")
@@ -108,12 +43,16 @@ def _field_complexity(item: dict[str, Any], item_name: str) -> str:
             item.get("field_name"),
             item.get("definition"),
             item.get("description"),
-            item.get("helpText"),
-            item.get("placeholder"),
         )
     ).lower()
+    normalized_name = _normalize_match_key(item_name)
+    narrative_names = {_normalize_match_key(name) for name in NARRATIVE_FIELD_NAMES}
 
-    if any(marker in candidate_text for marker in NARRATIVE_TEXT_MARKERS):
+    if normalized_name in narrative_names:
+        return "narrative"
+
+    narrative_markers = ("basis", "drivers", "triggers", "summary", "rationale", "narrative")
+    if any(marker in candidate_text for marker in narrative_markers):
         return "narrative"
 
     return "categorical_scalar"
@@ -125,7 +64,6 @@ def _context_chunk_limit_for_complexity(field_complexity: str) -> int:
     if field_complexity == "narrative":
         return NARRATIVE_CONTEXT_CHUNK_LIMIT
     return SCALAR_CONTEXT_CHUNK_LIMIT
-
 
 def _reset_llm_request_to_stateless_turn(callback_context=None, llm_request=None, **_kwargs) -> None:
     """Strip ADK chat history before each model call.
