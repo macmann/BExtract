@@ -113,8 +113,9 @@ def _reciprocal_rank_fusion(rankings: list[list[dict[str, object]]], rank_consta
     return [chunk_id for chunk_id, _ in sorted(fused_scores.items(), key=lambda item: item[1], reverse=True)]
 
 
-async def _document_hybrid_search(query: str) -> str:
+async def _document_hybrid_search(query: str, *, chunk_limit: int = 3) -> str:
     query = query.strip()
+    chunk_limit = max(1, min(int(chunk_limit or 3), 10))
     query_embedding = _query_embedding(query)
 
     document_id = _current_document_id.get()
@@ -128,7 +129,7 @@ async def _document_hybrid_search(query: str) -> str:
     for dense_match in dense_matches:
         chunks_by_id[str(dense_match.get("id"))] = dense_match
 
-    fused_chunk_ids = _reciprocal_rank_fusion([dense_matches, sparse_matches])[:3]
+    fused_chunk_ids = _reciprocal_rank_fusion([dense_matches, sparse_matches])[:chunk_limit]
     if not fused_chunk_ids:
         return "No relevant chunks found."
 
@@ -140,11 +141,16 @@ async def document_hybrid_search(
     definition: str = "",
     *,
     query: str | None = None,
+    chunk_limit: int = 3,
 ) -> str:
-    """Return the top three chunks using pgvector + BM25 reciprocal rank fusion."""
+    """Return top chunks using pgvector + BM25 reciprocal rank fusion.
+
+    ``chunk_limit`` defaults to the narrow scalar-field window but callers can
+    request a wider evidence window for narrative/summary fields.
+    """
 
     search_query = query if query is not None else f"{field_name} {definition}".strip()
-    return await _document_hybrid_search(search_query)
+    return await _document_hybrid_search(search_query, chunk_limit=chunk_limit)
 
 
 search_tool = FunctionTool(document_hybrid_search)
