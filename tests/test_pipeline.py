@@ -67,6 +67,32 @@ def test_normalize_workflow_results_matches_keys_case_space_and_underscore_insen
     assert normalized["rating_action"]["confidence"] == 0.93
 
 
+def test_field_complexity_uses_ui_metadata_and_generic_language_not_fixed_names():
+    from server.pipeline import _context_chunk_limit_for_complexity, _field_complexity
+
+    ui_long_text_field = {
+        "name": "Management view",
+        "dataType": "LongText",
+        "definition": "Provide the requested response from the uploaded document.",
+    }
+    generic_summary_field = {
+        "name": "Key considerations",
+        "dataType": "String",
+        "definition": "Summarize the main factors behind the decision.",
+    }
+    scalar_field = {
+        "name": "Published date",
+        "dataType": "Date",
+        "definition": "Extract the publication date.",
+    }
+
+    assert _field_complexity(ui_long_text_field, "Management view") == "narrative"
+    assert _field_complexity(generic_summary_field, "Key considerations") == "narrative"
+    assert _field_complexity(scalar_field, "Published date") == "categorical_scalar"
+    assert _context_chunk_limit_for_complexity("narrative") == 8
+    assert _context_chunk_limit_for_complexity("categorical_scalar") == 3
+
+
 def test_parse_pre_injected_response_accepts_fenced_json_object():
     from server.pipeline import _parse_pre_injected_response
 
@@ -432,7 +458,7 @@ def test_run_pre_injected_extraction_transforms_query_without_example_format(mon
 
     events = asyncio.run(collect_events())
 
-    assert search_calls == [{"query": "final decision keywords"}]
+    assert search_calls == [{"query": "final decision keywords", "chunk_limit": 3}]
     query_prompt = DummyGenAI.last_client.aio.models.prompts[0]["contents"]
     assert "Rating Action" in query_prompt
     assert "Extract and format the final decision." in query_prompt
@@ -539,14 +565,20 @@ def test_run_pre_injected_extraction_isolates_each_field_context(monkeypatch):
 
     events = asyncio.run(collect_events())
 
-    assert search_calls == [{"query": "rating trigger keywords"}, {"query": "capital ratio keywords"}]
+    assert search_calls == [
+        {"query": "rating trigger keywords", "chunk_limit": 8},
+        {"query": "capital ratio keywords", "chunk_limit": 3},
+    ]
     prompts = [call["contents"] for call in DummyGenAI.last_client.aio.models.prompts]
     assert "Rating triggers" in prompts[0]
     assert "Capital ratio" not in prompts[0]
+    assert "Field complexity: narrative" in prompts[1]
+    assert "expanded evidence window" in prompts[1]
     assert "Rating trigger chunk" in prompts[1]
     assert "Capital ratio" not in prompts[1]
     assert "Capital ratio" in prompts[2]
     assert "Rating triggers" not in prompts[2]
+    assert "Field complexity: categorical_scalar" in prompts[3]
     assert "Capital ratio chunk" in prompts[3]
     assert "Rating triggers" not in prompts[3]
     assert events[-1]["results"]["rating_triggers"]["value"] == "Downgrade trigger"

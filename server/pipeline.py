@@ -22,6 +22,111 @@ from server.custom_tools import document_hybrid_search, search_tool
 INPUT_RATE_PER_MILLION = 1.50
 OUTPUT_RATE_PER_MILLION = 9.00
 
+NARRATIVE_CONTEXT_CHUNK_LIMIT = 8
+SCALAR_CONTEXT_CHUNK_LIMIT = 3
+
+NARRATIVE_UI_TYPE_MARKERS = (
+    "longtext",
+    "textarea",
+    "multiline",
+    "paragraph",
+    "markdown",
+    "richtext",
+    "narrative",
+    "summary",
+    "freeform",
+)
+SCALAR_UI_TYPE_MARKERS = (
+    "date",
+    "datetime",
+    "number",
+    "integer",
+    "float",
+    "decimal",
+    "currency",
+    "percentage",
+    "percent",
+    "boolean",
+    "select",
+    "dropdown",
+    "enum",
+    "rating",
+)
+NARRATIVE_TEXT_MARKERS = (
+    "summar",
+    "describe",
+    "explain",
+    "discuss",
+    "outline",
+    "basis",
+    "rationale",
+    "reason",
+    "driver",
+    "trigger",
+    "factor",
+    "consideration",
+    "commentary",
+    "assessment",
+    "analysis",
+    "strength",
+    "weakness",
+    "mitigant",
+    "outlook",
+)
+
+
+def _field_complexity(item: dict[str, Any], item_name: str) -> str:
+    """Classify UI-defined fields without relying on hard-coded field names."""
+
+    ui_metadata = " ".join(
+        str(item.get(key) or "")
+        for key in (
+            "type",
+            "routeType",
+            "dataType",
+            "data_type",
+            "inputType",
+            "input_type",
+            "component",
+            "widget",
+            "format",
+        )
+    ).lower()
+    normalized_ui_metadata = _normalize_match_key(ui_metadata)
+
+    if any(marker in normalized_ui_metadata for marker in NARRATIVE_UI_TYPE_MARKERS):
+        return "narrative"
+    if any(marker in normalized_ui_metadata for marker in SCALAR_UI_TYPE_MARKERS):
+        return "categorical_scalar"
+
+    candidate_text = " ".join(
+        str(value or "")
+        for value in (
+            item_name,
+            item.get("name"),
+            item.get("label"),
+            item.get("field_name"),
+            item.get("definition"),
+            item.get("description"),
+            item.get("helpText"),
+            item.get("placeholder"),
+        )
+    ).lower()
+
+    if any(marker in candidate_text for marker in NARRATIVE_TEXT_MARKERS):
+        return "narrative"
+
+    return "categorical_scalar"
+
+
+def _context_chunk_limit_for_complexity(field_complexity: str) -> int:
+    """Return the protected retrieval budget for a classified field."""
+
+    if field_complexity == "narrative":
+        return NARRATIVE_CONTEXT_CHUNK_LIMIT
+    return SCALAR_CONTEXT_CHUNK_LIMIT
+
+
 def _reset_llm_request_to_stateless_turn(callback_context=None, llm_request=None, **_kwargs) -> None:
     """Strip ADK chat history before each model call.
 
@@ -799,7 +904,14 @@ def _clean_generated_search_query(raw_query: str, fallback_query: str) -> str:
     return cleaned or fallback_query
 
 
-def _pre_injected_prompt(item: dict[str, Any], item_id: str, item_name: str, chunks: str) -> str:
+def _pre_injected_prompt(
+    item: dict[str, Any],
+    item_id: str,
+    item_name: str,
+    chunks: str,
+    *,
+    field_complexity: str = "categorical_scalar",
+) -> str:
     item_type = str(item.get("type") or item.get("routeType") or "Scalar")
     definition = str(item.get("definition") or item.get("description") or "")
     data_type = str(item.get("dataType") or item.get("data_type") or "String")
@@ -813,7 +925,15 @@ def _pre_injected_prompt(item: dict[str, Any], item_id: str, item_name: str, chu
         f"Field type: {item_type}\n"
         f"Expected data type/unit: {data_type}\n"
         f"Definition: {definition}\n"
+        f"Field complexity: {field_complexity}\n"
     )
+
+    if field_complexity == "narrative":
+        base_prompt += (
+            "Context policy: This narrative field was given an expanded evidence window. "
+            "Synthesize across all supplied chunks and do not ignore later context solely "
+            "because earlier chunks contain partial answers.\n"
+        )
 
     example_format = item.get("example_format")
     if example_format:
@@ -865,8 +985,16 @@ async def _extract_isolated_field(
         getattr(query_response, "text", "") or "",
         fallback_query,
     )
-    chunks = await document_hybrid_search(query=generated_clean_query)
-    prompt = _pre_injected_prompt(item, item_id, item_name, chunks)
+    field_complexity = _field_complexity(item, item_name)
+    chunk_limit = _context_chunk_limit_for_complexity(field_complexity)
+    chunks = await document_hybrid_search(query=generated_clean_query, chunk_limit=chunk_limit)
+    prompt = _pre_injected_prompt(
+        item,
+        item_id,
+        item_name,
+        chunks,
+        field_complexity=field_complexity,
+    )
     generation_config = {"response_mime_type": "application/json"}
     response = await client.aio.models.generate_content(
         model=model,
