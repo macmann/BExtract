@@ -813,8 +813,36 @@ async def extract_document(files: List[UploadFile] = File(...), payload: str = F
 
 app.mount("/exports", StaticFiles(directory=EXPORT_DIR), name="exports")
 
+
+def _client_page_response(route_path: str) -> FileResponse | JSONResponse:
+    """Serve a statically exported Next.js page for direct browser navigation."""
+
+    normalized_path = route_path.strip("/")
+    candidate_files = [
+        CLIENT_OUT_DIR / normalized_path / "index.html",
+        CLIENT_OUT_DIR / f"{normalized_path}.html",
+    ]
+    if not normalized_path:
+        candidate_files = [CLIENT_OUT_DIR / "index.html"]
+
+    for candidate_file in candidate_files:
+        if candidate_file.exists():
+            return FileResponse(candidate_file)
+
+    return JSONResponse({"detail": "Not Found"}, status_code=404)
+
+
 if CLIENT_OUT_DIR.exists():
     app.mount("/_next", StaticFiles(directory=CLIENT_OUT_DIR / "_next"), name="next-static")
+
+    @app.api_route("/results", methods=["GET", "HEAD"], include_in_schema=False)
+    async def results_page() -> FileResponse | JSONResponse:
+        return _client_page_response("results")
+
+    @app.api_route("/results/inspector", methods=["GET", "HEAD"], include_in_schema=False)
+    async def results_inspector_page() -> FileResponse | JSONResponse:
+        return _client_page_response("results/inspector")
+
     app.mount("/", StaticFiles(directory=CLIENT_OUT_DIR, html=True), name="client")
 else:
     @app.get("/")
