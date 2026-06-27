@@ -23,11 +23,6 @@ from server.custom_tools import document_hybrid_search, search_tool
 INPUT_RATE_PER_MILLION = 1.50
 OUTPUT_RATE_PER_MILLION = 9.00
 
-NARRATIVE_FIELD_NAMES = {
-    "rating action basis",
-    "rating drivers",
-    "rating triggers",
-}
 NARRATIVE_CONTEXT_CHUNK_LIMIT = 8
 SCALAR_CONTEXT_CHUNK_LIMIT = 3
 NULL_VALUES = {None, "", "null", "none", "n/a", "na", "not found", "not available"}
@@ -60,12 +55,6 @@ def _field_complexity(item: dict[str, Any], item_name: str) -> str:
             item.get("description"),
         )
     ).lower()
-    normalized_name = _normalize_match_key(item_name)
-    narrative_names = {_normalize_match_key(name) for name in NARRATIVE_FIELD_NAMES}
-
-    if normalized_name in narrative_names:
-        return "narrative"
-
     if str(item.get("dataType") or item.get("data_type") or "").strip().lower() in {"longtext", "long text", "text"}:
         return "narrative"
 
@@ -562,17 +551,41 @@ def extract_month_year_from_filename(filename: str | None) -> str | None:
     return datetime(int(match.group(1)), int(match.group(2)), 1).strftime("%B %Y")
 
 
-def apply_published_date_fallback(
+def _template_requests_month_year_fallback(item: dict[str, Any] | None, result: dict[str, Any]) -> bool:
+    """Return True when frontend template metadata asks for date-like recovery."""
+
+    item = item or {}
+    if item.get("enableMonthYearFallback") is False or item.get("enable_month_year_fallback") is False:
+        return False
+
+    data_type = str(
+        item.get("dataType")
+        or item.get("data_type")
+        or result.get("data_type")
+        or result.get("unit")
+        or ""
+    ).strip().lower()
+    if data_type in {"date", "datetime", "month-year", "month_year", "month year"}:
+        return True
+
+    if item.get("enableMonthYearFallback") is True or item.get("enable_month_year_fallback") is True:
+        return True
+
+    return False
+
+
+def apply_month_year_date_fallback(
     result: Any,
+    item: dict[str, Any] | None = None,
     page1_text: str | None = None,
     page2_text: str | None = None,
     filename: str | None = None,
 ) -> Any:
-    """Recover Published date from first pages or filename when LLM output is null."""
+    """Recover a template-defined date field from first pages or filename when output is null."""
 
     if not isinstance(result, dict):
         return result
-    if str(result.get("field_name", "")).strip().lower() != "published date":
+    if not _template_requests_month_year_fallback(item, result):
         return result
     if not is_nullish(result.get("value")):
         return result
@@ -584,7 +597,11 @@ def apply_published_date_fallback(
     )
     if recovered:
         result["value"] = recovered
-        result["confidence"] = max(float(result.get("confidence") or 0), 0.9)
+        try:
+            existing_confidence = float(result.get("confidence") or 0)
+        except (TypeError, ValueError):
+            existing_confidence = 0.0
+        result["confidence"] = max(existing_confidence, 0.9)
         existing = result.get("critique_response") or ""
         result["critique_response"] = f"{existing} Recovered by deterministic month-year fallback.".strip()
 
@@ -1197,8 +1214,9 @@ async def run_pre_injected_extraction(
             item_id=item_id,
             item_name=item_name,
         )
-        extraction_results[item_id] = apply_published_date_fallback(
+        extraction_results[item_id] = apply_month_year_date_fallback(
             field_output["result"],
+            item=item,
             page1_text=page_texts.get(1),
             page2_text=page_texts.get(2),
             filename=document_id,

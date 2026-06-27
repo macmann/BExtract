@@ -81,14 +81,14 @@ def test_field_complexity_uses_ui_metadata_and_generic_language_not_fixed_names(
         "definition": "Summarize the main factors behind the decision.",
     }
     scalar_field = {
-        "name": "Published date",
+        "name": "Publication month",
         "dataType": "Date",
         "definition": "Extract the publication date.",
     }
 
     assert _field_complexity(ui_long_text_field, "Management view") == "narrative"
     assert _field_complexity(generic_summary_field, "Key considerations") == "narrative"
-    assert _field_complexity(scalar_field, "Published date") == "categorical_scalar"
+    assert _field_complexity(scalar_field, "Publication month") == "categorical_scalar"
     assert _context_chunk_limit_for_complexity("narrative") == 8
     assert _context_chunk_limit_for_complexity("categorical_scalar") == 3
 
@@ -121,7 +121,7 @@ def test_recover_null_value_result_leaves_valid_value_unchanged():
     from server.pipeline import recover_null_value_result
 
     result = {
-        "field_name": "Published date",
+        "field_name": "Publication month",
         "value": "May 2018",
         "confidence": 0.95,
         "evidence": '{"value":"June 2019"}',
@@ -140,14 +140,14 @@ def test_recover_null_value_result_recovers_nested_json_from_evidence():
 
     evidence = json.dumps(
         {
-            "item_id": "published_date",
-            "field_name": "Published date",
+            "item_id": "publication_month",
+            "field_name": "Publication month",
             "value": "May 2018",
             "confidence": 0.95,
         }
     )
     result = {
-        "field_name": "Published date",
+        "field_name": "Publication month",
         "value": None,
         "confidence": 0.0,
         "evidence": evidence,
@@ -166,14 +166,14 @@ def test_recover_null_value_result_recovers_malformed_nested_json_by_regex():
     from server.pipeline import recover_null_value_result
 
     evidence = '''{
-      "item_id": "rating_triggers",
-      "field_name": "Rating triggers",
+      "item_id": "decision_drivers",
+      "field_name": "Decision drivers",
       "value": "Upside potential: better earnings
 Downward pressure: weaker capital",
       "confidence": 0.9,
     }'''
     result = {
-        "field_name": "Rating triggers",
+        "field_name": "Decision drivers",
         "value": "null",
         "confidence": None,
         "evidence": evidence,
@@ -186,35 +186,35 @@ Downward pressure: weaker capital",
     assert recovered["confidence"] == 0.75
 
 
-def test_published_date_fallback_recovers_may_2018_from_page_1_text():
-    from server.pipeline import apply_published_date_fallback
+def test_month_year_date_fallback_recovers_may_2018_from_page_1_text():
+    from server.pipeline import apply_month_year_date_fallback
 
-    result = {"field_name": "Published date", "value": None, "confidence": 0.0, "critique_response": ""}
+    result = {"field_name": "Publication month", "value": None, "confidence": 0.0, "critique_response": ""}
 
-    recovered = apply_published_date_fallback(result, page1_text="RAM Ratings publication May 2018")
+    recovered = apply_month_year_date_fallback(result, item={"dataType": "Date"}, page1_text="Document publication May 2018")
 
     assert recovered["value"] == "May 2018"
     assert recovered["confidence"] == 0.9
     assert "deterministic month-year fallback" in recovered["critique_response"]
 
 
-def test_published_date_fallback_ignores_bad_date_context_before_page_1_date():
-    from server.pipeline import apply_published_date_fallback
+def test_month_year_date_fallback_ignores_bad_date_context_before_page_1_date():
+    from server.pipeline import apply_month_year_date_fallback
 
-    result = {"field_name": "Published date", "value": None, "confidence": 0.0, "critique_response": ""}
+    result = {"field_name": "Publication month", "value": None, "confidence": 0.0, "critique_response": ""}
     page1_text = "Last Rating Action 8 September 2017\nThis press release was published in May 2018."
 
-    recovered = apply_published_date_fallback(result, page1_text=page1_text)
+    recovered = apply_month_year_date_fallback(result, item={"dataType": "Date"}, page1_text=page1_text)
 
     assert recovered["value"] == "May 2018"
 
 
-def test_recover_null_value_result_recovers_rating_triggers_full_text():
+def test_recover_null_value_result_recovers_decision_drivers_full_text():
     from server.pipeline import recover_null_value_result
 
     value = "Upside potential: improved capitalization | Downward pressure: weaker earnings"
     result = {
-        "field_name": "Rating triggers",
+        "field_name": "Decision drivers",
         "value": None,
         "confidence": 0.0,
         "evidence": json.dumps({"value": value}),
@@ -224,11 +224,11 @@ def test_recover_null_value_result_recovers_rating_triggers_full_text():
     assert recover_null_value_result(result)["value"] == value
 
 
-def test_recover_null_value_result_recovers_issue_ratings():
+def test_recover_null_value_result_recovers_symbolic_value():
     from server.pipeline import recover_null_value_result
 
     result = {
-        "field_name": "Issue ratings",
+        "field_name": "Instrument outlook",
         "value": None,
         "confidence": 0.0,
         "evidence": "{'value': 'AAA(s)/Stable/-', 'confidence': 0.96}",
@@ -614,7 +614,7 @@ def test_run_pre_injected_extraction_isolates_each_field_context(monkeypatch):
             self.prompts.append(kwargs)
             prompt_index = len(self.prompts)
             if prompt_index == 1:
-                return DummyResponse("rating trigger keywords")
+                return DummyResponse("decision driver keywords")
             if prompt_index == 2:
                 return DummyResponse(
                     json.dumps(
@@ -622,7 +622,7 @@ def test_run_pre_injected_extraction_isolates_each_field_context(monkeypatch):
                             "value": "Downgrade trigger",
                             "unit": None,
                             "confidence": 0.95,
-                            "evidence": "Rating trigger chunk",
+                            "evidence": "Decision driver chunk",
                         }
                     )
                 )
@@ -654,8 +654,8 @@ def test_run_pre_injected_extraction_isolates_each_field_context(monkeypatch):
 
     async def fake_document_hybrid_search(**kwargs):
         search_calls.append(kwargs)
-        if kwargs["query"] == "rating trigger keywords":
-            return "Rating trigger chunk"
+        if kwargs["query"] == "decision driver keywords":
+            return "Decision driver chunk"
         return "Capital ratio chunk"
 
     monkeypatch.setattr(pipeline, "genai", DummyGenAI)
@@ -668,8 +668,8 @@ def test_run_pre_injected_extraction_isolates_each_field_context(monkeypatch):
             {
                 "items": [
                     {
-                        "id": "rating_triggers",
-                        "name": "Rating triggers",
+                        "id": "decision_drivers",
+                        "name": "Decision drivers",
                         "definition": "Find downgrade triggers.",
                     },
                     {
@@ -687,20 +687,20 @@ def test_run_pre_injected_extraction_isolates_each_field_context(monkeypatch):
     events = asyncio.run(collect_events())
 
     assert search_calls == [
-        {"query": "rating trigger keywords", "chunk_limit": 8},
+        {"query": "decision driver keywords", "chunk_limit": 8},
         {"query": "capital ratio keywords", "chunk_limit": 3},
     ]
     prompts = [call["contents"] for call in DummyGenAI.last_client.aio.models.prompts]
-    assert "Rating triggers" in prompts[0]
+    assert "Decision drivers" in prompts[0]
     assert "Capital ratio" not in prompts[0]
     assert "Field complexity: narrative" in prompts[1]
     assert "expanded evidence window" in prompts[1]
-    assert "Rating trigger chunk" in prompts[1]
+    assert "Decision driver chunk" in prompts[1]
     assert "Capital ratio" not in prompts[1]
     assert "Capital ratio" in prompts[2]
-    assert "Rating triggers" not in prompts[2]
+    assert "Decision drivers" not in prompts[2]
     assert "Field complexity: categorical_scalar" in prompts[3]
     assert "Capital ratio chunk" in prompts[3]
-    assert "Rating triggers" not in prompts[3]
-    assert events[-1]["results"]["rating_triggers"]["value"] == "Downgrade trigger"
+    assert "Decision drivers" not in prompts[3]
+    assert events[-1]["results"]["decision_drivers"]["value"] == "Downgrade trigger"
     assert events[-1]["results"]["capital_ratio"]["value"] == "12.5%"
