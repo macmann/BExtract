@@ -22,6 +22,49 @@ from server.custom_tools import document_hybrid_search, search_tool
 INPUT_RATE_PER_MILLION = 1.50
 OUTPUT_RATE_PER_MILLION = 9.00
 
+NARRATIVE_FIELD_NAMES = {
+    "rating action basis",
+    "rating drivers",
+    "rating triggers",
+}
+NARRATIVE_CONTEXT_CHUNK_LIMIT = 8
+SCALAR_CONTEXT_CHUNK_LIMIT = 3
+
+
+def _field_complexity(item: dict[str, Any], item_name: str) -> str:
+    """Classify fields so narrative summaries receive a wider RAG window."""
+
+    candidate_text = " ".join(
+        str(value or "")
+        for value in (
+            item_name,
+            item.get("name"),
+            item.get("label"),
+            item.get("field_name"),
+            item.get("definition"),
+            item.get("description"),
+        )
+    ).lower()
+    normalized_name = _normalize_match_key(item_name)
+    narrative_names = {_normalize_match_key(name) for name in NARRATIVE_FIELD_NAMES}
+
+    if normalized_name in narrative_names:
+        return "narrative"
+
+    narrative_markers = ("basis", "drivers", "triggers", "summary", "rationale", "narrative")
+    if any(marker in candidate_text for marker in narrative_markers):
+        return "narrative"
+
+    return "categorical_scalar"
+
+
+def _context_chunk_limit_for_complexity(field_complexity: str) -> int:
+    """Return the protected retrieval budget for a classified field."""
+
+    if field_complexity == "narrative":
+        return NARRATIVE_CONTEXT_CHUNK_LIMIT
+    return SCALAR_CONTEXT_CHUNK_LIMIT
+
 def _reset_llm_request_to_stateless_turn(callback_context=None, llm_request=None, **_kwargs) -> None:
     """Strip ADK chat history before each model call.
 
@@ -799,7 +842,14 @@ def _clean_generated_search_query(raw_query: str, fallback_query: str) -> str:
     return cleaned or fallback_query
 
 
-def _pre_injected_prompt(item: dict[str, Any], item_id: str, item_name: str, chunks: str) -> str:
+def _pre_injected_prompt(
+    item: dict[str, Any],
+    item_id: str,
+    item_name: str,
+    chunks: str,
+    *,
+    field_complexity: str = "categorical_scalar",
+) -> str:
     item_type = str(item.get("type") or item.get("routeType") or "Scalar")
     definition = str(item.get("definition") or item.get("description") or "")
     data_type = str(item.get("dataType") or item.get("data_type") or "String")
@@ -813,7 +863,15 @@ def _pre_injected_prompt(item: dict[str, Any], item_id: str, item_name: str, chu
         f"Field type: {item_type}\n"
         f"Expected data type/unit: {data_type}\n"
         f"Definition: {definition}\n"
+        f"Field complexity: {field_complexity}\n"
     )
+
+    if field_complexity == "narrative":
+        base_prompt += (
+            "Context policy: This narrative field was given an expanded evidence window. "
+            "Synthesize across all supplied chunks and do not ignore later context solely "
+            "because earlier chunks contain partial answers.\n"
+        )
 
     example_format = item.get("example_format")
     if example_format:
@@ -865,8 +923,16 @@ async def _extract_isolated_field(
         getattr(query_response, "text", "") or "",
         fallback_query,
     )
-    chunks = await document_hybrid_search(query=generated_clean_query)
-    prompt = _pre_injected_prompt(item, item_id, item_name, chunks)
+    field_complexity = _field_complexity(item, item_name)
+    chunk_limit = _context_chunk_limit_for_complexity(field_complexity)
+    chunks = await document_hybrid_search(query=generated_clean_query, chunk_limit=chunk_limit)
+    prompt = _pre_injected_prompt(
+        item,
+        item_id,
+        item_name,
+        chunks,
+        field_complexity=field_complexity,
+    )
     generation_config = {"response_mime_type": "application/json"}
     response = await client.aio.models.generate_content(
         model=model,

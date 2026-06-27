@@ -432,7 +432,7 @@ def test_run_pre_injected_extraction_transforms_query_without_example_format(mon
 
     events = asyncio.run(collect_events())
 
-    assert search_calls == [{"query": "final decision keywords"}]
+    assert search_calls == [{"query": "final decision keywords", "chunk_limit": 3}]
     query_prompt = DummyGenAI.last_client.aio.models.prompts[0]["contents"]
     assert "Rating Action" in query_prompt
     assert "Extract and format the final decision." in query_prompt
@@ -539,14 +539,20 @@ def test_run_pre_injected_extraction_isolates_each_field_context(monkeypatch):
 
     events = asyncio.run(collect_events())
 
-    assert search_calls == [{"query": "rating trigger keywords"}, {"query": "capital ratio keywords"}]
+    assert search_calls == [
+        {"query": "rating trigger keywords", "chunk_limit": 8},
+        {"query": "capital ratio keywords", "chunk_limit": 3},
+    ]
     prompts = [call["contents"] for call in DummyGenAI.last_client.aio.models.prompts]
     assert "Rating triggers" in prompts[0]
     assert "Capital ratio" not in prompts[0]
+    assert "Field complexity: narrative" in prompts[1]
+    assert "expanded evidence window" in prompts[1]
     assert "Rating trigger chunk" in prompts[1]
     assert "Capital ratio" not in prompts[1]
     assert "Capital ratio" in prompts[2]
     assert "Rating triggers" not in prompts[2]
+    assert "Field complexity: categorical_scalar" in prompts[3]
     assert "Capital ratio chunk" in prompts[3]
     assert "Rating triggers" not in prompts[3]
     assert events[-1]["results"]["rating_triggers"]["value"] == "Downgrade trigger"
