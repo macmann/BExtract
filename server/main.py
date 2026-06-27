@@ -835,11 +835,11 @@ def _client_page_response(route_path: str) -> FileResponse | JSONResponse:
 if CLIENT_OUT_DIR.exists():
     app.mount("/_next", StaticFiles(directory=CLIENT_OUT_DIR / "_next"), name="next-static")
 
-    @app.api_route("/results", methods=["GET", "HEAD"], include_in_schema=False)
+    @app.api_route("/results", methods=["GET", "HEAD"], include_in_schema=False, response_model=None)
     async def results_page() -> FileResponse | JSONResponse:
         return _client_page_response("results")
 
-    @app.api_route("/results/inspector", methods=["GET", "HEAD"], include_in_schema=False)
+    @app.api_route("/results/inspector", methods=["GET", "HEAD"], include_in_schema=False, response_model=None)
     async def results_inspector_page() -> FileResponse | JSONResponse:
         return _client_page_response("results/inspector")
 
