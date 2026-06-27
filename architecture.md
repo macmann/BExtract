@@ -157,14 +157,20 @@ Compiled extraction payload
      +--------+---------+
      |                  |
      v                  v
-  Yes: commit       No: retry only
-  final JSON        failed item with
-  to database       critic feedback
-     |                  |
+  Yes: continue    No: retry only
+  to final checks  failed item with
+     |             critic feedback
      v                  +-----> back to relevant extractor
+Empty-result verifier
+  |
+  | 16. Retry missing/unusable fields up to 3 times
+  v
+Commit final JSON to database
+  |
+  v
 Next.js UI
   |
-  | 16. Receive final SSE result and done event
+  | 17. Receive final SSE result and done event
   v
 User reviews structured extraction output
 ```
@@ -174,6 +180,10 @@ User reviews structured extraction output
 - PDF ingestion is now documented as a two-step text-first path: PyPDF2 extracts page text, then the chunker splits that extracted text.
 - The architecture diagrams and pipeline tables now make clear that raw PDF bytes are not chunked directly.
 - The current embedding/indexing path is documented as 3072-dimensional `gemini-embedding-001` vectors stored in PostgreSQL with `pgvector`.
+- Runtime execution now includes a shared **empty-result verification retry** safety net. Agentic workflow results are normalized first, then any missing or unusable item is retried through the stateless pre-injected verifier up to three times with alternate retrieval.
+- The pre-injected RAG path now performs per-field query transformation before retrieval, classifies narrative fields for a wider evidence window, and applies the same up-to-three verification retry loop when a field returns no usable value.
+- Retry attempts intentionally change search angle by using synonyms, nearby labels, abbreviations, and table headers; each retry expands the retrieval budget and records token/cost audit entries for both query transformation and extraction calls.
+- Agentic execution now emits heartbeat SSE logs while the ADK workflow is still running, so long-running critic/extractor runs remain visible in the browser.
 - Current limitation: PyPDF2 does not provide OCR for scanned/image-only PDFs; those files need an embedded text layer or an OCR preprocessing enhancement.
 
 ## Document Processing Pipeline
@@ -191,7 +201,8 @@ The document processing pipeline has clear subsystem ownership. Each step transf
 | 7 | Runtime selector | Template JSON and `approach` / `extractionApproach` | ADK workflow nodes or pre-injected per-field prompts | Creates one extraction path per requested field/table. |
 | 8 | Extractor agents | Item definition and retrieved context | Strict JSON value/table rows | Produces structured extraction output. |
 | 9 | Critic agent / audit layer | Compiled payload and model events | Pass/fail decision, optional critique, token/cost metrics | Adds quality control, targeted retry, and operational cost visibility. |
-| 10 | Commit node | Validated payload | `ExtractionResult` row | Stores final result for downstream review and integration. |
+| 10 | Empty-result verifier | Missing/empty normalized results | Retried field results plus retry audit metrics | Recovers fields that were missed because first-pass retrieval or context was too narrow. |
+| 11 | Commit node | Validated and retry-augmented payload | `ExtractionResult` row | Stores final result for downstream review and integration. |
 
 ### Pipeline Flow Chart
 
@@ -229,10 +240,13 @@ The document processing pipeline has clear subsystem ownership. Each step transf
                               pass            fail
                                |                |
                                v                v
-                         [Commit Result]   [Retry Failed Item]
+                    [Empty-Result Verifier] [Retry Failed Item]
                                |                |
                                v                |
-                         [SSE Final JSON] <-----+
+                         [Commit Result] <------+
+                               |
+                               v
+                         [SSE Final JSON]
 ```
 
 
@@ -258,6 +272,9 @@ Both paths share the same ingestion, retrieval scope, result normalization, data
                                          |
                                          v
                          [Normalize results + token/cost audit]
+                                         |
+                                         v
+                         [Empty-result verification retry]
                                          |
                                          v
                          [Prisma commit + SSE result/debug logs]
@@ -343,6 +360,94 @@ START
 ```
 
 The retry loop is intentionally narrow. The critic identifies **exactly one failed item** and attaches actionable critique to that item. The workflow then reruns only the affected extractor path instead of repeating the entire document extraction.
+
+
+## Retry and Recovery Mechanisms
+
+BExtractor uses two complementary retry mechanisms. They solve different failure modes and are intentionally scoped so the system avoids expensive full-document reruns.
+
+| Retry mechanism | Applies to | Trigger | Maximum attempts | Retry scope | Retrieval behavior | Audit behavior |
+| --- | --- | --- | ---: | --- | --- | --- |
+| Critic-routed agentic retry | `agentic` workflow | Critic returns `status = fail` with a retryable `failed_item_id` | Workflow route dependent; one failed item is routed at a time | Only the failed template item | Re-enters that item's prepare/extractor/collect path with critic feedback in state | Captured as part of the ADK workflow event and node audit output. |
+| Empty-result verification retry | `pre-injected` path and post-`agentic` safety net | Normalized item result has no usable extracted content | 3 per empty field | Only missing/empty fields | Generates a fresh 3-5 word search query, asks for alternate labels/synonyms/table headers on retries, expands retrieved chunks, and reruns isolated extraction | Adds query-transform and extraction audit nodes, usage entries, and token/cost metrics. |
+
+### Critic-Routed Agentic Retry
+
+The ADK graph compiles item-level results, runs the critic, and then calls `route_critic_result`. If the critic passes, the payload goes to the database commit node. If the critic fails and names a known template item, the route becomes `retry_<item_id>` and the graph jumps back to that item's prepare node. This keeps the correction loop focused on the single item the critic believes is wrong, rather than rebuilding every extraction result.
+
+```text
+[compile_payload]
+      |
+      v
+[critic_agent]
+      |
+      v
+[route_critic_result]
+      |
+      +-- status=pass ------------------> [db_commit_node]
+      |
+      +-- status=fail + failed_item_id --> [prepare failed item]
+                                          |
+                                          v
+                                  [extract failed item]
+                                          |
+                                          v
+                                      [collect]
+                                          |
+                                          v
+                                  [compile_payload]
+```
+
+### Empty-Result Verification Retry
+
+Empty-result verification is a retrieval-focused recovery path for cases where a model response is syntactically valid but does not contain a usable value. The same policy is shared across both extraction approaches:
+
+1. Detect item results whose `value`/table rows are null, empty, or equivalent to common not-found markers.
+2. For each empty field, run up to three isolated verifier attempts.
+3. Generate a concise retrieval query for the field before each attempt.
+4. On retry attempts, instruct the query generator to use a different search angle: synonyms, nearby labels, abbreviations, or table headers.
+5. Increase the chunk budget on retries so the verifier can inspect more context; narrative fields keep a protected wider context window.
+6. Prompt the extractor with the prior empty result and require it to return `null` only after explicitly checking the supplied evidence.
+7. Stop retrying that field as soon as a usable result is produced.
+8. Merge verifier results back into the main extraction result and combine token/cost metrics.
+
+```text
+[Normalized extraction results]
+          |
+          v
+[Find empty / unusable fields]
+          |
+          +-- none -------------------------------> [Commit / return]
+          |
+          v
+[For each empty field]
+          |
+          v
+[Generate alternate retrieval query]
+          |
+          v
+[Hybrid search with expanded chunk budget]
+          |
+          v
+[Isolated strict-JSON extraction]
+          |
+          v
++------------------------+
+| Usable result found?   |
++-----------+------------+
+            |
+     +------+------+
+     |             |
+    yes            no, attempts remain
+     |             |
+     v             v
+[Merge result]   [Retry with different query angle]
+     |
+     v
+[Combine audit + token/cost metrics]
+```
+
+This design separates **correctness retry** from **coverage retry**. The critic-routed retry handles inconsistent or incorrect extracted values; the empty-result verifier handles missing values caused by weak first-pass retrieval or overly narrow context.
 
 ## Retrieval and Search Architecture
 
@@ -480,8 +585,9 @@ BExtract/
 7. **Strict JSON extraction**: Scalar and tabular agents return constrained JSON with values/rows, confidence, evidence, and critique response.
 8. **Compilation**: Individual results are collected into a single payload keyed by template item ID.
 9. **Critic validation**: The critic checks cross-field consistency, accounting equations, subtotals, date ranges, formatting, and template compliance.
-10. **Retry or commit**: Failed items are routed back through their extractor with critique; passing payloads are committed to PostgreSQL.
-11. **Client update**: The API streams progress and final structured JSON back to the browser over SSE.
+10. **Critic retry or pass**: Failed items are routed back through their extractor with critique; passing payloads proceed toward finalization.
+11. **Empty-result verification**: Missing or unusable item outputs are retried up to three times with alternate query generation, expanded context, and isolated strict-JSON extraction.
+12. **Commit and client update**: The API streams progress and final structured JSON back to the browser over SSE.
 
 ## Technical Investor Notes
 
