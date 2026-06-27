@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
 import {
@@ -1857,6 +1858,12 @@ export default function Home() {
                   </label>
                 ))}
               </fieldset>
+              <Link
+                href="/results"
+                className="inline-flex items-center gap-2 rounded-xl border border-cyan-300/40 bg-slate-950/80 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-cyan-100 transition hover:border-cyan-200 hover:bg-cyan-300/10 hover:text-white"
+              >
+                <ClipboardList className="h-4 w-4" /> Results History
+              </Link>
               <button
                 onClick={() => handleRunExtraction()}
                 disabled={isLoading}
