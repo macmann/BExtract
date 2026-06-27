@@ -15,6 +15,12 @@ datasource db {
   extensions = [vector]
 }
 
+enum PipelineExecutionStatus {
+  processing
+  success
+  failed
+}
+
 model DocumentTemplate {
   id          String             @id @default(cuid())
   name        String
@@ -47,4 +53,37 @@ model DocumentChunk {
   embedding     Unsupported("vector(3072)")
   metadata      Json?
   extraction    ExtractionResult @relation(fields: [extraction_id], references: [id], onDelete: Cascade)
+}
+
+model PipelineRun {
+  id                String                  @id @default(uuid()) @db.Uuid
+  templateId        String?                 @map("template_id")
+  status            PipelineExecutionStatus @default(processing)
+  startedAt         DateTime                @default(now()) @map("started_at")
+  completedAt       DateTime?               @map("completed_at")
+  totalFiles        Int                     @map("total_files")
+  processedFiles    Int                     @default(0) @map("processed_files")
+  totalInputTokens  Int                     @default(0) @map("total_input_tokens")
+  totalOutputTokens Int                     @default(0) @map("total_output_tokens")
+  totalCostUsd      Float                   @default(0.0) @map("total_cost_usd")
+  fileExtractions   FileExtraction[]
+
+  @@index([templateId])
+  @@index([status])
+  @@map("pipeline_runs")
+}
+
+model FileExtraction {
+  id               String                  @id @default(uuid()) @db.Uuid
+  runId            String                  @map("run_id") @db.Uuid
+  fileName         String                  @map("file_name")
+  status           PipelineExecutionStatus @default(processing)
+  extractedPayload Json                    @default("{}") @map("extracted_payload")
+  logs             String                  @default("") @db.Text
+  errorMessage     String?                 @map("error_message") @db.Text
+  run              PipelineRun             @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId])
+  @@index([status])
+  @@map("file_extractions")
 }
