@@ -117,6 +117,127 @@ def test_parse_pre_injected_response_falls_back_without_preserving_raw_as_value(
     assert parsed["evidence"] == raw_response
 
 
+def test_recover_null_value_result_leaves_valid_value_unchanged():
+    from server.pipeline import recover_null_value_result
+
+    result = {
+        "field_name": "Published date",
+        "value": "May 2018",
+        "confidence": 0.95,
+        "evidence": '{"value":"June 2019"}',
+        "critique_response": "",
+    }
+
+    recovered = recover_null_value_result(result)
+
+    assert recovered["value"] == "May 2018"
+    assert recovered["confidence"] == 0.95
+    assert recovered["critique_response"] == ""
+
+
+def test_recover_null_value_result_recovers_nested_json_from_evidence():
+    from server.pipeline import recover_null_value_result
+
+    evidence = json.dumps(
+        {
+            "item_id": "published_date",
+            "field_name": "Published date",
+            "value": "May 2018",
+            "confidence": 0.95,
+        }
+    )
+    result = {
+        "field_name": "Published date",
+        "value": None,
+        "confidence": 0.0,
+        "evidence": evidence,
+        "critique_response": "",
+    }
+
+    recovered = recover_null_value_result(result)
+
+    assert recovered["value"] == "May 2018"
+    assert recovered["confidence"] == 0.75
+    assert recovered["evidence"] == evidence
+    assert "Recovered from nested JSON in evidence" in recovered["critique_response"]
+
+
+def test_recover_null_value_result_recovers_malformed_nested_json_by_regex():
+    from server.pipeline import recover_null_value_result
+
+    evidence = '''{
+      "item_id": "rating_triggers",
+      "field_name": "Rating triggers",
+      "value": "Upside potential: better earnings
+Downward pressure: weaker capital",
+      "confidence": 0.9,
+    }'''
+    result = {
+        "field_name": "Rating triggers",
+        "value": "null",
+        "confidence": None,
+        "evidence": evidence,
+        "critique_response": "",
+    }
+
+    recovered = recover_null_value_result(result)
+
+    assert recovered["value"] == "Upside potential: better earnings Downward pressure: weaker capital"
+    assert recovered["confidence"] == 0.75
+
+
+def test_published_date_fallback_recovers_may_2018_from_page_1_text():
+    from server.pipeline import apply_published_date_fallback
+
+    result = {"field_name": "Published date", "value": None, "confidence": 0.0, "critique_response": ""}
+
+    recovered = apply_published_date_fallback(result, page1_text="RAM Ratings publication May 2018")
+
+    assert recovered["value"] == "May 2018"
+    assert recovered["confidence"] == 0.9
+    assert "deterministic month-year fallback" in recovered["critique_response"]
+
+
+def test_published_date_fallback_ignores_bad_date_context_before_page_1_date():
+    from server.pipeline import apply_published_date_fallback
+
+    result = {"field_name": "Published date", "value": None, "confidence": 0.0, "critique_response": ""}
+    page1_text = "Last Rating Action 8 September 2017\nThis press release was published in May 2018."
+
+    recovered = apply_published_date_fallback(result, page1_text=page1_text)
+
+    assert recovered["value"] == "May 2018"
+
+
+def test_recover_null_value_result_recovers_rating_triggers_full_text():
+    from server.pipeline import recover_null_value_result
+
+    value = "Upside potential: improved capitalization | Downward pressure: weaker earnings"
+    result = {
+        "field_name": "Rating triggers",
+        "value": None,
+        "confidence": 0.0,
+        "evidence": json.dumps({"value": value}),
+        "critique_response": "",
+    }
+
+    assert recover_null_value_result(result)["value"] == value
+
+
+def test_recover_null_value_result_recovers_issue_ratings():
+    from server.pipeline import recover_null_value_result
+
+    result = {
+        "field_name": "Issue ratings",
+        "value": None,
+        "confidence": 0.0,
+        "evidence": "{'value': 'AAA(s)/Stable/-', 'confidence': 0.96}",
+        "critique_response": "",
+    }
+
+    assert recover_null_value_result(result)["value"] == "AAA(s)/Stable/-"
+
+
 def test_calculate_token_cost_metrics_sums_adk_event_usage_metadata():
     from server.pipeline import calculate_token_cost_metrics
 

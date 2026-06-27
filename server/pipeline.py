@@ -8,6 +8,7 @@ import json
 import os
 import re
 from collections.abc import AsyncIterator
+from datetime import datetime
 from typing import Any
 
 from google.adk import Workflow
@@ -29,6 +30,20 @@ NARRATIVE_FIELD_NAMES = {
 }
 NARRATIVE_CONTEXT_CHUNK_LIMIT = 8
 SCALAR_CONTEXT_CHUNK_LIMIT = 3
+NULL_VALUES = {None, "", "null", "none", "n/a", "na", "not found", "not available"}
+MONTHS = (
+    "January|February|March|April|May|June|July|August|"
+    "September|October|November|December"
+)
+BAD_DATE_CONTEXT = re.compile(
+    r"(Last Rating Action|Maturity|Coupon|Financial|FY|Analyst|"
+    r"Related Criteria|Copyright|Issue Date)",
+    re.IGNORECASE,
+)
+FLAT_JSON_GUARD = (
+    "Return only one flat JSON object. Do not place JSON inside evidence or critique_response. "
+    "The evidence and critique_response fields must be plain text only. Do not include nested JSON."
+)
 
 
 def _field_complexity(item: dict[str, Any], item_name: str) -> str:
@@ -51,7 +66,10 @@ def _field_complexity(item: dict[str, Any], item_name: str) -> str:
     if normalized_name in narrative_names:
         return "narrative"
 
-    narrative_markers = ("basis", "drivers", "triggers", "summary", "rationale", "narrative")
+    if str(item.get("dataType") or item.get("data_type") or "").strip().lower() in {"longtext", "long text", "text"}:
+        return "narrative"
+
+    narrative_markers = ("basis", "drivers", "triggers", "summary", "summarize", "rationale", "narrative")
     if any(marker in candidate_text for marker in narrative_markers):
         return "narrative"
 
@@ -121,7 +139,8 @@ scalar_extractor = LlmAgent(
         "before answering. Return strict JSON only with keys: item_id, field_name, "
         "value, unit, confidence, evidence, and critique_response. If workflow "
         "state includes a critique for this item, correct the extraction and "
-        "explain the fix in critique_response."
+        "explain the fix in critique_response. "
+        f"{FLAT_JSON_GUARD}"
     ),
     tools=[search_tool],
     mode="single_turn",
@@ -139,7 +158,8 @@ tabular_extractor = LlmAgent(
         "definition before answering. Preserve row order, column names, numeric "
         "types, and source evidence. Return strict JSON only with keys: item_id, "
         "table_name, rows, confidence, evidence, and critique_response. If workflow "
-        "state includes a critique for this table, revise only the affected rows."
+        "state includes a critique for this table, revise only the affected rows. "
+        f"{FLAT_JSON_GUARD}"
     ),
     tools=[search_tool],
     mode="single_turn",
@@ -435,6 +455,142 @@ def _case_insensitive_get(payload: dict[str, Any], *keys: str, default: Any = No
     return default
 
 
+def is_nullish(value: Any) -> bool:
+    """Return True for values that should be treated as missing extraction output."""
+
+    if value is None:
+        return True
+    if isinstance(value, str) and value.strip().lower() in NULL_VALUES:
+        return True
+    return False
+
+
+def clean_recovered_value(value: Any) -> str | None:
+    """Normalize a candidate value recovered from malformed nested JSON text."""
+
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = cleaned.replace("\\n", " ").strip()
+    return cleaned if not is_nullish(cleaned) else None
+
+
+def recover_value_from_text(text: Any) -> str | None:
+    """Recover a nested ``value`` field from JSON or JSON-like evidence text."""
+
+    if not text or not isinstance(text, str):
+        return None
+
+    stripped = text.strip()
+
+    try:
+        parsed = json.loads(stripped)
+        if isinstance(parsed, dict):
+            return clean_recovered_value(parsed.get("value"))
+    except (TypeError, json.JSONDecodeError):
+        pass
+
+    object_match = re.search(r"\{.*?\}", stripped, re.DOTALL)
+    if object_match:
+        try:
+            parsed = json.loads(object_match.group(0))
+            if isinstance(parsed, dict):
+                return clean_recovered_value(parsed.get("value"))
+        except (TypeError, json.JSONDecodeError):
+            pass
+
+    match = re.search(r'"value"\s*:\s*"((?:[^"\\]|\\.)*)"', stripped, re.DOTALL)
+    if match:
+        return clean_recovered_value(match.group(1))
+
+    match = re.search(r"'value'\s*:\s*'((?:[^'\\]|\\.)*)'", stripped, re.DOTALL)
+    if match:
+        return clean_recovered_value(match.group(1))
+
+    return None
+
+
+def recover_null_value_result(result: Any) -> Any:
+    """Fill a null result value from malformed nested JSON in evidence/critique text."""
+
+    if not isinstance(result, dict) or not is_nullish(result.get("value")):
+        return result
+
+    for source_key in ("evidence", "critique_response"):
+        recovered = recover_value_from_text(result.get(source_key))
+        if recovered:
+            result["value"] = recovered
+            if not result.get("confidence") or result.get("confidence") == 0:
+                result["confidence"] = 0.75
+            note = f"Recovered from nested JSON in {source_key}."
+            existing = result.get("critique_response") or ""
+            result["critique_response"] = f"{existing} {note}".strip()
+            return result
+
+    return result
+
+
+def extract_month_year_from_text(text: str | None) -> str | None:
+    """Return the first month-year date not surrounded by known non-publication labels."""
+
+    if not text:
+        return None
+
+    pattern = re.compile(rf"\b({MONTHS})\s+(19\d{{2}}|20\d{{2}})\b", re.IGNORECASE)
+    for match in pattern.finditer(text):
+        start = max(text.rfind("\n", 0, match.start()), text.rfind(".", 0, match.start())) + 1
+        end_candidates = [candidate for candidate in (text.find("\n", match.end()), text.find(".", match.end())) if candidate != -1]
+        end = min(end_candidates) if end_candidates else min(len(text), match.end() + 80)
+        if BAD_DATE_CONTEXT.search(text[start:end]):
+            continue
+        return f"{match.group(1).title()} {match.group(2)}"
+
+    return None
+
+
+def extract_month_year_from_filename(filename: str | None) -> str | None:
+    """Convert YYYYMMDD in a filename to Month YYYY."""
+
+    if not filename:
+        return None
+
+    match = re.search(r"(20\d{2}|19\d{2})(0[1-9]|1[0-2])([0-3]\d)", filename)
+    if not match:
+        return None
+
+    return datetime(int(match.group(1)), int(match.group(2)), 1).strftime("%B %Y")
+
+
+def apply_published_date_fallback(
+    result: Any,
+    page1_text: str | None = None,
+    page2_text: str | None = None,
+    filename: str | None = None,
+) -> Any:
+    """Recover Published date from first pages or filename when LLM output is null."""
+
+    if not isinstance(result, dict):
+        return result
+    if str(result.get("field_name", "")).strip().lower() != "published date":
+        return result
+    if not is_nullish(result.get("value")):
+        return result
+
+    recovered = (
+        extract_month_year_from_text(page1_text)
+        or extract_month_year_from_text(page2_text)
+        or extract_month_year_from_filename(filename)
+    )
+    if recovered:
+        result["value"] = recovered
+        result["confidence"] = max(float(result.get("confidence") or 0), 0.9)
+        existing = result.get("critique_response") or ""
+        result["critique_response"] = f"{existing} Recovered by deterministic month-year fallback.".strip()
+
+    return result
+
+
 def _parse_result_payload(raw: Any) -> Any:
     """Parse extractor outputs that may be dicts, ADK part payloads, or JSON strings."""
 
@@ -512,7 +668,7 @@ def normalize_workflow_results(template_payload: dict[str, Any], workflow_output
 
         if isinstance(result, dict):
             item_name = str(item.get("name") or item.get("label") or item_id)
-            mapped[item_id] = {
+            mapped[item_id] = recover_null_value_result({
                 "item_id": str(_case_insensitive_get(result, "item_id", "item id", default=item_id)),
                 "field_name": str(_case_insensitive_get(result, "field_name", "field name", "table_name", "table name", default=item_name)),
                 "value": _case_insensitive_get(result, "value", "rows", "data", "answer", default="Pending ADK extraction result"),
@@ -520,7 +676,7 @@ def normalize_workflow_results(template_payload: dict[str, Any], workflow_output
                 "confidence": _case_insensitive_get(result, "confidence", "score", default=0.0),
                 "evidence": _case_insensitive_get(result, "evidence", "source", "citation", default=""),
                 "critique_response": _case_insensitive_get(result, "critique_response", "critique response", default=""),
-            }
+            })
         elif result is not None:
             mapped[item_id] = result
 
@@ -604,7 +760,7 @@ def _make_collect_item(item_id: str, output_key: str):
     def collect_item(ctx) -> dict[str, Any]:
         results = dict(ctx.state.get("extraction_results", {}))
         raw_result = _state_pop(ctx.state, output_key, None)
-        results[item_id] = _parse_result_payload(raw_result)
+        results[item_id] = recover_null_value_result(_parse_result_payload(raw_result))
         ctx.state["extraction_results"] = results
         _state_pop(ctx.state, "current_item", None)
         return {"item_id": item_id, "result": results[item_id]}
@@ -857,6 +1013,7 @@ def _pre_injected_prompt(
         "You are extracting one field from a document using only the retrieved evidence below.\n"
         "Return strict JSON only. Do not wrap the JSON in markdown.\n"
         "Required keys: item_id, field_name, value, unit, confidence, evidence, critique_response.\n"
+        f"{FLAT_JSON_GUARD}\n"
         "For tabular fields, put the parsed row array in value.\n\n"
         f"Item ID: {item_id}\n"
         f"Field name: {item_name}\n"
@@ -885,6 +1042,38 @@ def _pre_injected_prompt(
         "\nRetrieved document chunks:\n"
         f"{chunks}\n"
     )
+
+
+async def _fetch_page_texts(document_id: str, pages: tuple[int, ...] = (1, 2)) -> dict[int, str]:
+    """Fetch concatenated chunk text for selected document pages."""
+
+    if not document_id:
+        return {}
+
+    from prisma import Prisma
+
+    client = Prisma()
+    await client.connect()
+    try:
+        rows = await client.query_raw(
+            'SELECT "chunk_text", "metadata" FROM "DocumentChunk" WHERE "extraction_id" = $1',
+            document_id,
+        )
+    finally:
+        await client.disconnect()
+
+    page_texts: dict[int, list[str]] = {page: [] for page in pages}
+    for row in rows:
+        record = dict(row)
+        metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+        try:
+            page = int(metadata.get("page"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if page in page_texts:
+            page_texts[page].append(str(record.get("chunk_text") or ""))
+
+    return {page: "\n".join(texts) for page, texts in page_texts.items()}
 
 
 async def _extract_isolated_field(
@@ -954,7 +1143,7 @@ async def _extract_isolated_field(
 
     raw_text = getattr(response, "text", "") or ""
     parsed = _parse_pre_injected_response(raw_text)
-    result = {
+    result = recover_null_value_result({
         "item_id": item_id,
         "field_name": item_name,
         "value": parsed.get("value"),
@@ -962,7 +1151,7 @@ async def _extract_isolated_field(
         "confidence": parsed.get("confidence", 0.0),
         "evidence": parsed.get("evidence", ""),
         "critique_response": parsed.get("critique_response", ""),
-    }
+    })
 
     return {
         "item_id": item_id,
@@ -991,6 +1180,10 @@ async def run_pre_injected_extraction(
     events: list[dict[str, Any]] = []
     node_audit_summary: list[dict[str, Any]] = []
     usage_entries: list[tuple[int, int]] = []
+    try:
+        page_texts = await _fetch_page_texts(document_id)
+    except Exception:
+        page_texts = {}
 
     for index, item in enumerate(_template_items(template), start=1):
         item_id = _item_id(item, index)
@@ -1004,7 +1197,12 @@ async def run_pre_injected_extraction(
             item_id=item_id,
             item_name=item_name,
         )
-        extraction_results[item_id] = field_output["result"]
+        extraction_results[item_id] = apply_published_date_fallback(
+            field_output["result"],
+            page1_text=page_texts.get(1),
+            page2_text=page_texts.get(2),
+            filename=document_id,
+        )
         events.extend(field_output["events"])
         usage_entries.extend(field_output["usage_entries"])
         node_audit_summary.extend(field_output["node_audit_summary"])
