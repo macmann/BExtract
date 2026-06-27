@@ -15,6 +15,7 @@ import {
   FolderOpen,
   Gauge,
   Layers3,
+  MoreVertical,
   Play,
   Plus,
   Save,
@@ -78,6 +79,21 @@ type SavedTemplate = {
   fields: FieldCard[];
   extractionApproach: ExtractionApproach;
   updatedAt: string;
+};
+
+type TemplateImportPayload = {
+  id?: string;
+  name?: string;
+  fields?: Partial<FieldCard>[];
+  items?: Partial<FieldCard>[];
+  extractionApproach?: ExtractionApproach;
+  updatedAt?: string;
+};
+
+type ToastState = {
+  id: number;
+  tone: RuntimeLog["tone"];
+  message: string;
 };
 
 const TEMPLATE_STORAGE_KEY = "bextract.savedTemplates";
@@ -734,6 +750,8 @@ function TemplateDrawer({
   onLoadTemplate,
   onDeleteTemplate,
   onRunTemplate,
+  onExportTemplate,
+  onImportTemplate,
   isLoading,
 }: {
   templates: SavedTemplate[];
@@ -744,8 +762,17 @@ function TemplateDrawer({
   onLoadTemplate: (template: SavedTemplate) => void;
   onDeleteTemplate: (templateId: string) => void;
   onRunTemplate: (template: SavedTemplate) => void;
+  onExportTemplate: (template: SavedTemplate) => void;
+  onImportTemplate: (file: File) => void;
   isLoading: boolean;
 }) {
+  const [openMenuTemplateId, setOpenMenuTemplateId] = useState<string | null>(null);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
+
+  const openImportPicker = () => {
+    setOpenMenuTemplateId(null);
+    importInputRef.current?.click();
+  };
   return (
     <aside className="w-72 shrink-0 border-r border-cyan-300/10 bg-[linear-gradient(180deg,#070b14,#03050a)] p-4">
       <div className="sticky top-4 space-y-4">
@@ -778,6 +805,18 @@ function TemplateDrawer({
           </button>
         </div>
 
+        <input
+          ref={importInputRef}
+          className="sr-only"
+          type="file"
+          accept="application/json,.json"
+          onChange={(event: ChangeEvent<HTMLInputElement>) => {
+            const selectedFile = event.target.files?.[0];
+            if (selectedFile) onImportTemplate(selectedFile);
+            event.target.value = "";
+          }}
+        />
+
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">
@@ -797,17 +836,50 @@ function TemplateDrawer({
                 key={template.id}
                 className={`rounded-2xl border p-3 transition ${activeTemplateId === template.id ? "border-cyan-300/60 bg-cyan-300/10" : "border-slate-800 bg-slate-900/60 hover:border-slate-600"}`}
               >
-                <button
-                  onClick={() => onLoadTemplate(template)}
-                  className="block w-full text-left"
-                >
-                  <p className="truncate text-sm font-bold text-slate-100">
-                    {template.name}
-                  </p>
-                  <p className="mt-1 text-[11px] text-slate-500">
-                    {template.fields.length} fields · {template.extractionApproach === "pre_injected" ? "Pre-Injected" : "Agentic"}
-                  </p>
-                </button>
+                <div className="relative flex items-start gap-2">
+                  <button
+                    onClick={() => onLoadTemplate(template)}
+                    className="min-w-0 flex-1 text-left"
+                  >
+                    <p className="truncate text-sm font-bold text-slate-100">
+                      {template.name}
+                    </p>
+                    <p className="mt-1 text-[11px] text-slate-500">
+                      {template.fields.length} fields · {template.extractionApproach === "pre_injected" ? "Pre-Injected" : "Agentic"}
+                    </p>
+                  </button>
+                  <button
+                    onClick={() =>
+                      setOpenMenuTemplateId((current) =>
+                        current === template.id ? null : template.id,
+                      )
+                    }
+                    className="rounded-lg border border-slate-700 bg-slate-950/70 p-1.5 text-slate-300 transition hover:border-cyan-300/60 hover:text-cyan-100"
+                    aria-label={`Open actions for ${template.name}`}
+                    aria-expanded={openMenuTemplateId === template.id}
+                  >
+                    <MoreVertical className="h-4 w-4" />
+                  </button>
+                  {openMenuTemplateId === template.id && (
+                    <div className="absolute right-0 top-8 z-20 w-44 overflow-hidden rounded-xl border border-slate-700 bg-slate-950 shadow-2xl shadow-black/50">
+                      <button
+                        onClick={openImportPicker}
+                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-semibold text-slate-200 hover:bg-cyan-300/10 hover:text-cyan-100"
+                      >
+                        <UploadCloud className="h-3.5 w-3.5" /> Input Template
+                      </button>
+                      <button
+                        onClick={() => {
+                          setOpenMenuTemplateId(null);
+                          onExportTemplate(template);
+                        }}
+                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-semibold text-slate-200 hover:bg-cyan-300/10 hover:text-cyan-100"
+                      >
+                        <Download className="h-3.5 w-3.5" /> Output Template
+                      </button>
+                    </div>
+                  )}
+                </div>
                 <div className="mt-3 grid grid-cols-[1fr_auto] gap-2">
                   <button
                     onClick={() => onRunTemplate(template)}
@@ -879,6 +951,7 @@ export default function Home() {
   );
   const runStartedAtRef = useRef<number | null>(null);
   const [isCostMetricsOpen, setIsCostMetricsOpen] = useState(false);
+  const [toast, setToast] = useState<ToastState | null>(null);
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -886,6 +959,12 @@ export default function Home() {
       JSON.stringify(savedTemplates),
     );
   }, [savedTemplates]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timeoutId = window.setTimeout(() => setToast(null), 3200);
+    return () => window.clearTimeout(timeoutId);
+  }, [toast]);
 
   const addField = () =>
     setFields((current) => [
@@ -922,6 +1001,9 @@ export default function Home() {
       updateDebugRunMetrics({ chunkCount: Number(chunkMatch[1]) });
     }
   };
+
+  const showToast = (tone: RuntimeLog["tone"], message: string) =>
+    setToast({ id: Date.now(), tone, message });
 
   const appendLog = (tone: RuntimeLog["tone"], text: string) =>
     setRuntimeLogs((current) => [
@@ -960,6 +1042,85 @@ export default function Home() {
     setActiveTemplateId(templateId);
     setTemplateName(normalizedName);
     appendLog("success", `Saved template "${normalizedName}".`);
+    showToast("success", `Template "${normalizedName}" saved successfully.`);
+  };
+
+
+  const buildTemplateExport = (template: SavedTemplate) => ({
+    id: template.id,
+    name: template.name,
+    fields: template.fields.map((field) => ({ ...field })),
+    extractionApproach: template.extractionApproach,
+    updatedAt: template.updatedAt,
+  });
+
+  const handleExportTemplate = (template: SavedTemplate) => {
+    const payload = buildTemplateExport(template);
+    const slug =
+      template.name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/(^-|-$)/g, "") || "bextract-template";
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${slug}-template.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    appendLog("success", `Downloaded template "${template.name}" as JSON.`);
+    showToast("success", `Template "${template.name}" exported successfully.`);
+  };
+
+  const normalizeImportedFields = (items: TemplateImportPayload["fields"]): FieldCard[] => {
+    if (!Array.isArray(items) || items.length === 0) {
+      throw new Error("Template JSON must include at least one field.");
+    }
+
+    return items.map((item, index) => ({
+      id:
+        typeof item.id === "number"
+          ? item.id
+          : Number(item.id) || Date.now() + index,
+      name: String(item.name ?? `Imported Field ${index + 1}`),
+      definition: String(item.definition ?? ""),
+      routeType: item.routeType === "Tabular" ? "Tabular" : "Scalar",
+      dataType: (["String", "Float", "Date", "Text Summary"] as DataType[]).includes(
+        item.dataType as DataType,
+      )
+        ? (item.dataType as DataType)
+        : "String",
+    }));
+  };
+
+  const handleImportTemplate = async (file: File) => {
+    try {
+      const payload = JSON.parse(await file.text()) as TemplateImportPayload;
+      const importedFields = normalizeImportedFields(
+        payload.fields ?? payload.items,
+      );
+      const importedTemplate: SavedTemplate = {
+        id: crypto.randomUUID(),
+        name:
+          String(payload.name ?? file.name.replace(/\.json$/i, "")).trim() ||
+          "Imported Template",
+        fields: importedFields,
+        extractionApproach:
+          payload.extractionApproach === "agentic" ? "agentic" : "pre_injected",
+        updatedAt: new Date().toISOString(),
+      };
+
+      setSavedTemplates((current) => [importedTemplate, ...current]);
+      applyTemplate(importedTemplate);
+      appendLog("success", `Imported template "${importedTemplate.name}".`);
+      showToast("success", `Template "${importedTemplate.name}" imported and saved successfully.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to import template JSON.";
+      appendLog("error", message);
+      showToast("error", message);
+    }
   };
 
   const handleDeleteTemplate = (templateId: string) => {
@@ -1492,6 +1653,21 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-[#060913] text-slate-100">
+      {toast && (
+        <div className="fixed left-1/2 top-4 z-[60] w-[calc(100%-2rem)] max-w-xl -translate-x-1/2" role="status" aria-live="polite">
+          <div
+            className={`rounded-2xl border px-4 py-3 text-sm font-semibold shadow-2xl backdrop-blur ${
+              toast.tone === "error"
+                ? "border-red-300/50 bg-red-950/90 text-red-100 shadow-red-950/40"
+                : toast.tone === "warn"
+                  ? "border-amber-300/50 bg-amber-950/90 text-amber-100 shadow-amber-950/40"
+                  : "border-emerald-300/50 bg-emerald-950/90 text-emerald-100 shadow-emerald-950/40"
+            }`}
+          >
+            {toast.message}
+          </div>
+        </div>
+      )}
       {isCostMetricsOpen && tokenCostMetrics && (
         <CostMetricsModal
           metrics={tokenCostMetrics}
@@ -1511,6 +1687,8 @@ export default function Home() {
           onLoadTemplate={applyTemplate}
           onDeleteTemplate={handleDeleteTemplate}
           onRunTemplate={handleRunSavedTemplate}
+          onExportTemplate={handleExportTemplate}
+          onImportTemplate={handleImportTemplate}
           isLoading={isLoading}
         />
         <section
