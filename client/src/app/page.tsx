@@ -7,6 +7,8 @@ import {
   Bot,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   CircleDollarSign,
   ClipboardList,
   DatabaseZap,
@@ -299,10 +301,22 @@ function FieldCardEditor({
   );
 }
 
-function BExtractorLogo({ isActive }: { isActive: boolean }) {
+function BExtractorLogo({
+  isActive,
+  size = "lg",
+}: {
+  isActive: boolean;
+  size?: "sm" | "md" | "lg";
+}) {
+  const sizeClasses = {
+    sm: { wrapper: "h-10 w-10", inset: "inset-1", svg: "h-7 w-7" },
+    md: { wrapper: "h-14 w-14", inset: "inset-2", svg: "h-10 w-10" },
+    lg: { wrapper: "h-28 w-28", inset: "inset-3", svg: "h-20 w-20" },
+  }[size];
+
   return (
     <div
-      className="relative flex h-28 w-28 items-center justify-center"
+      className={`relative flex ${sizeClasses.wrapper} items-center justify-center`}
       aria-label="BExtractor animated processing logo"
     >
       <div
@@ -311,11 +325,11 @@ function BExtractorLogo({ isActive }: { isActive: boolean }) {
         <div className="h-full w-full rounded-full bg-slate-950" />
       </div>
       <div
-        className={`absolute inset-3 rounded-full border border-cyan-300/20 bg-cyan-300/5 shadow-[0_0_40px_rgba(34,211,238,0.22)] ${isActive ? "animate-pulse" : ""}`}
+        className={`absolute ${sizeClasses.inset} rounded-full border border-cyan-300/20 bg-cyan-300/5 shadow-[0_0_40px_rgba(34,211,238,0.22)] ${isActive ? "animate-pulse" : ""}`}
       />
       <svg
         viewBox="0 0 96 96"
-        className="relative h-20 w-20 drop-shadow-[0_0_18px_rgba(34,211,238,0.45)]"
+        className={`relative ${sizeClasses.svg} drop-shadow-[0_0_18px_rgba(34,211,238,0.45)]`}
         role="img"
         aria-hidden="true"
       >
@@ -793,6 +807,8 @@ function TemplateDrawer({
   onExportTemplate,
   onImportTemplate,
   isLoading,
+  isExpanded,
+  onToggleExpanded,
 }: {
   templates: SavedTemplate[];
   activeTemplateId: string | null;
@@ -805,6 +821,8 @@ function TemplateDrawer({
   onExportTemplate: (template: SavedTemplate) => void;
   onImportTemplate: (file: File, targetTemplate?: SavedTemplate) => void;
   isLoading: boolean;
+  isExpanded: boolean;
+  onToggleExpanded: () => void;
 }) {
   const [openMenuTemplateId, setOpenMenuTemplateId] = useState<string | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
@@ -816,8 +834,38 @@ function TemplateDrawer({
     importInputRef.current?.click();
   };
   return (
-    <aside className="w-72 shrink-0 border-r border-cyan-300/10 bg-[linear-gradient(180deg,#070b14,#03050a)] p-4">
+    <aside
+      className={`${isExpanded ? "w-72 p-4" : "w-[4.75rem] px-3 py-4"} shrink-0 border-r border-cyan-300/10 bg-[linear-gradient(180deg,#070b14,#03050a)] transition-all duration-300`}
+      aria-label="Template side panel"
+    >
       <div className="sticky top-4 space-y-4">
+        <button
+          onClick={onToggleExpanded}
+          className="flex w-full items-center justify-center gap-2 rounded-2xl border border-cyan-300/20 bg-cyan-300/10 px-3 py-2 text-xs font-black uppercase tracking-[0.16em] text-cyan-100 transition hover:border-cyan-200 hover:bg-cyan-300/20"
+          aria-label={isExpanded ? "Collapse template panel" : "Expand template panel"}
+          aria-expanded={isExpanded}
+        >
+          {isExpanded ? (
+            <>
+              <ChevronLeft className="h-4 w-4" /> Collapse
+            </>
+          ) : (
+            <ChevronRight className="h-4 w-4" />
+          )}
+        </button>
+        {!isExpanded && (
+          <div className="flex flex-col items-center gap-3 pt-2 text-center">
+            <BExtractorLogo isActive={isLoading} size="sm" />
+            <span className="[writing-mode:vertical-rl] rotate-180 text-[10px] font-black uppercase tracking-[0.26em] text-cyan-200">
+              Templates
+            </span>
+            <span className="rounded-full bg-slate-800 px-2 py-1 text-[10px] font-bold text-slate-400">
+              {templates.length}
+            </span>
+          </div>
+        )}
+        {isExpanded && (
+          <>
         <div>
           <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.24em] text-cyan-300">
             <FolderOpen className="h-4 w-4" /> Templates
@@ -945,6 +993,8 @@ function TemplateDrawer({
             ))
           )}
         </div>
+          </>
+        )}
       </div>
     </aside>
   );
@@ -963,6 +1013,7 @@ export default function Home() {
   >([]);
   const [isLoading, setIsLoading] = useState(false);
   const [showDebugPanel, setShowDebugPanel] = useState(true);
+  const [isTemplatePanelExpanded, setIsTemplatePanelExpanded] = useState(true);
   const [templateName, setTemplateName] = useState("BExtractor Template");
   const [savedTemplates, setSavedTemplates] = useState<SavedTemplate[]>(() => {
     if (typeof window === "undefined") return [];
@@ -1759,18 +1810,28 @@ export default function Home() {
           onExportTemplate={handleExportTemplate}
           onImportTemplate={handleImportTemplate}
           isLoading={isLoading}
+          isExpanded={isTemplatePanelExpanded}
+          onToggleExpanded={() =>
+            setIsTemplatePanelExpanded((isExpanded) => !isExpanded)
+          }
         />
         <section
           className={`${showDebugPanel ? "w-full xl:w-[60%] xl:border-r" : "w-full"} border-cyan-300/10 bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.14),transparent_32%),linear-gradient(180deg,#0f172a,#070b14)] p-5 transition-all duration-500`}
         >
-          <header className="mb-5 flex items-center justify-between">
-            <div>
-              <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.28em] text-cyan-300">
-                <CircleDollarSign className="h-4 w-4" /> BExtractor
-              </p>
-              <h1 className="mt-2 text-2xl font-black tracking-tight text-white">
-                Template Configurator
-              </h1>
+          <header className="mb-5 flex items-center justify-between gap-4">
+            <div className="flex min-w-0 items-center gap-4">
+              <BExtractorLogo isActive={isLoading} size="md" />
+              <div className="min-w-0">
+                <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.28em] text-cyan-300">
+                  <CircleDollarSign className="h-4 w-4" /> AI Document Intelligence
+                </p>
+                <h1 className="mt-2 text-3xl font-black tracking-tight text-white sm:text-4xl">
+                  BExtractor Studio
+                </h1>
+                <p className="mt-1 max-w-xl text-xs text-slate-400">
+                  Configure templates, extract fields, and validate results from one workspace.
+                </p>
+              </div>
             </div>
             <div className="flex flex-wrap items-center justify-end gap-2">
               <fieldset className="flex rounded-xl border border-slate-700/80 bg-slate-950/70 p-1 shadow-inner shadow-black/20">
