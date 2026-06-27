@@ -29,6 +29,8 @@ NARRATIVE_FIELD_NAMES = {
 }
 NARRATIVE_CONTEXT_CHUNK_LIMIT = 8
 SCALAR_CONTEXT_CHUNK_LIMIT = 3
+EMPTY_RESULT_MAX_RETRIES = 3
+
 
 
 def _field_complexity(item: dict[str, Any], item_name: str) -> str:
@@ -819,18 +821,58 @@ async def workflow_progress(template_payload: dict[str, Any]) -> AsyncIterator[d
 
 
 
-def _query_generation_prompt(field: Any) -> str:
+def _result_has_extracted_content(result: Any) -> bool:
+    """Return True when an extraction result contains a usable value or rows."""
+
+    if result is None:
+        return False
+    if isinstance(result, str):
+        return bool(result.strip())
+    if isinstance(result, (int, float, bool)):
+        return True
+    if isinstance(result, list):
+        return len(result) > 0
+    if isinstance(result, dict):
+        normalized = {_normalize_match_key(key): value for key, value in result.items()}
+        for key in ("value", "rows", "data", "answer"):
+            normalized_key = _normalize_match_key(key)
+            if normalized_key in normalized:
+                return _result_has_extracted_content(normalized[normalized_key])
+        meaningful_keys = ("extractedvalue", "extractedtext")
+        return any(_result_has_extracted_content(normalized[key]) for key in meaningful_keys if key in normalized)
+    return True
+
+
+def _missing_result_item_ids(template_payload: dict[str, Any], results: dict[str, Any]) -> list[str]:
+    """Find template item IDs whose current result is absent or empty."""
+
+    missing: list[str] = []
+    for index, item in enumerate(_template_items(template_payload), start=1):
+        item_id = _item_id(item, index)
+        if not _result_has_extracted_content(results.get(item_id)):
+            missing.append(item_id)
+    return missing
+
+
+def _query_generation_prompt(field: Any, retry_attempt: int = 0) -> str:
     """Build a domain-agnostic prompt for concise retrieval keyword generation."""
 
     field_name = str(getattr(field, "name", "") or (field.get("name", "") if isinstance(field, dict) else ""))
     field_definition = str(
         getattr(field, "definition", "") or (field.get("definition", "") if isinstance(field, dict) else "")
     )
+    retry_instruction = ""
+    if retry_attempt:
+        retry_instruction = (
+            f" This is retry attempt {retry_attempt}; use a different search angle with "
+            "synonyms, nearby labels, abbreviations, or table headers rather than repeating the first query."
+        )
     return (
         f"You are an expert search query generator. Based on the target field '{field_name}' "
         f"and its definition '{field_definition}', generate a 3 to 5 word concise search query "
         "to find this exact information in the source document. Ignore instruction verbs like "
         "'summarise', 'format', or 'extract'. Return ONLY the keywords."
+        f"{retry_instruction}"
     )
 
 
@@ -849,6 +891,8 @@ def _pre_injected_prompt(
     chunks: str,
     *,
     field_complexity: str = "categorical_scalar",
+    retry_attempt: int = 0,
+    prior_result: Any = None,
 ) -> str:
     item_type = str(item.get("type") or item.get("routeType") or "Scalar")
     definition = str(item.get("definition") or item.get("description") or "")
@@ -873,6 +917,16 @@ def _pre_injected_prompt(
             "because earlier chunks contain partial answers.\n"
         )
 
+    if retry_attempt:
+        base_prompt += (
+            f"Retry policy: this is empty-result verification retry {retry_attempt} of "
+            f"{EMPTY_RESULT_MAX_RETRIES}. The previous extraction returned no usable value: "
+            f"{json.dumps(prior_result, default=str)[:1000]}. Re-check the evidence with a "
+            "different interpretation of labels, abbreviations, and table context. Return a value "
+            "as soon as the evidence supports one. Only return null/empty after explicitly verifying "
+            "the supplied evidence does not contain the requested information.\n"
+        )
+
     example_format = item.get("example_format")
     if example_format:
         base_prompt += (
@@ -894,11 +948,13 @@ async def _extract_isolated_field(
     item: dict[str, Any],
     item_id: str,
     item_name: str,
+    retry_attempt: int = 0,
+    prior_result: Any = None,
 ) -> dict[str, Any]:
     """Extract one template field in its own query, retrieval, and LLM context."""
 
     definition = str(item.get("definition") or item.get("description") or "")
-    query_prompt = _query_generation_prompt(item)
+    query_prompt = _query_generation_prompt(item, retry_attempt=retry_attempt)
     query_response = await client.aio.models.generate_content(
         model=model,
         contents=query_prompt,
@@ -911,7 +967,7 @@ async def _extract_isolated_field(
     query_input_tokens = sum(input_count for input_count, _ in query_usage)
     query_output_tokens = sum(output_count for _, output_count in query_usage)
     query_node_audit = {
-        "node_name": f"query_transform_{item_id}"[:80],
+        "node_name": f"query_transform_{item_id}_retry_{retry_attempt}"[:80] if retry_attempt else f"query_transform_{item_id}"[:80],
         "input_tokens": query_input_tokens,
         "output_tokens": query_output_tokens,
         "dynamic_context_length": _estimated_context_length(query_prompt),
@@ -925,6 +981,8 @@ async def _extract_isolated_field(
     )
     field_complexity = _field_complexity(item, item_name)
     chunk_limit = _context_chunk_limit_for_complexity(field_complexity)
+    if retry_attempt:
+        chunk_limit = max(chunk_limit + retry_attempt * 2, NARRATIVE_CONTEXT_CHUNK_LIMIT)
     chunks = await document_hybrid_search(query=generated_clean_query, chunk_limit=chunk_limit)
     prompt = _pre_injected_prompt(
         item,
@@ -932,6 +990,8 @@ async def _extract_isolated_field(
         item_name,
         chunks,
         field_complexity=field_complexity,
+        retry_attempt=retry_attempt,
+        prior_result=prior_result,
     )
     generation_config = {"response_mime_type": "application/json"}
     response = await client.aio.models.generate_content(
@@ -945,7 +1005,7 @@ async def _extract_isolated_field(
     response_input_tokens = sum(input_count for input_count, _ in response_usage)
     response_output_tokens = sum(output_count for _, output_count in response_usage)
     extraction_node_audit = {
-        "node_name": f"pre_injected_{item_id}"[:80],
+        "node_name": f"pre_injected_{item_id}_retry_{retry_attempt}"[:80] if retry_attempt else f"pre_injected_{item_id}"[:80],
         "input_tokens": response_input_tokens,
         "output_tokens": response_output_tokens,
         "dynamic_context_length": _estimated_context_length(prompt),
@@ -968,8 +1028,8 @@ async def _extract_isolated_field(
         "item_id": item_id,
         "result": result,
         "events": [
-            {"node_name": f"query_transform_{item_id}", "response": query_response_payload},
-            {"node_name": f"pre_injected_{item_id}", "response": response_payload},
+            {"node_name": f"query_transform_{item_id}_retry_{retry_attempt}" if retry_attempt else f"query_transform_{item_id}", "response": query_response_payload},
+            {"node_name": f"pre_injected_{item_id}_retry_{retry_attempt}" if retry_attempt else f"pre_injected_{item_id}", "response": response_payload},
         ],
         "usage_entries": query_usage + response_usage,
         "node_audit_summary": [query_node_audit, extraction_node_audit],
@@ -1009,6 +1069,27 @@ async def run_pre_injected_extraction(
         usage_entries.extend(field_output["usage_entries"])
         node_audit_summary.extend(field_output["node_audit_summary"])
 
+        retry_attempt = 1
+        while retry_attempt <= EMPTY_RESULT_MAX_RETRIES and not _result_has_extracted_content(extraction_results[item_id]):
+            yield (
+                f"No usable result for {item_name}; running verification retry "
+                f"{retry_attempt}/{EMPTY_RESULT_MAX_RETRIES} with alternate retrieval."
+            )
+            retry_output = await _extract_isolated_field(
+                client=client,
+                model=model,
+                item=item,
+                item_id=item_id,
+                item_name=item_name,
+                retry_attempt=retry_attempt,
+                prior_result=extraction_results[item_id],
+            )
+            extraction_results[item_id] = retry_output["result"]
+            events.extend(retry_output["events"])
+            usage_entries.extend(retry_output["usage_entries"])
+            node_audit_summary.extend(retry_output["node_audit_summary"])
+            retry_attempt += 1
+
     token_cost_metrics = _metrics_from_usage_entries(usage_entries)
     if log_final_metrics:
         log_token_cost_metrics(token_cost_metrics)
@@ -1024,6 +1105,67 @@ async def run_pre_injected_extraction(
         },
         "token_cost_metrics": token_cost_metrics,
         "node_audit_summary": node_audit_summary,
+    }
+
+
+async def retry_empty_extraction_results(
+    template: dict[str, Any],
+    existing_results: dict[str, Any],
+    *,
+    model: str = "gemini-3.5-flash",
+) -> AsyncIterator[dict[str, Any] | str]:
+    """Retry missing/empty extraction results with the pre-injected verifier path.
+
+    This helper is used after non-pre-injected pipelines as a safety net so every
+    extraction approach gets the same up-to-three empty-result verification loop.
+    """
+
+    missing_item_ids = set(_missing_result_item_ids(template, existing_results))
+    if not missing_item_ids:
+        return
+
+    yield (
+        f"Empty-result verifier found {len(missing_item_ids)} field(s) without usable output; "
+        f"retrying each up to {EMPTY_RESULT_MAX_RETRIES} time(s)."
+    )
+    client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+    events: list[dict[str, Any]] = []
+    node_audit_summary: list[dict[str, Any]] = []
+    usage_entries: list[tuple[int, int]] = []
+    retried_results: dict[str, Any] = {}
+
+    for index, item in enumerate(_template_items(template), start=1):
+        item_id = _item_id(item, index)
+        if item_id not in missing_item_ids:
+            continue
+        item_name = str(item.get("name") or item.get("label") or item_id)
+        prior_result = existing_results.get(item_id)
+        for retry_attempt in range(1, EMPTY_RESULT_MAX_RETRIES + 1):
+            yield f"Verifying empty result for {item_name}: retry {retry_attempt}/{EMPTY_RESULT_MAX_RETRIES}."
+            field_output = await _extract_isolated_field(
+                client=client,
+                model=model,
+                item=item,
+                item_id=item_id,
+                item_name=item_name,
+                retry_attempt=retry_attempt,
+                prior_result=prior_result,
+            )
+            retried_results[item_id] = field_output["result"]
+            events.extend(field_output["events"])
+            usage_entries.extend(field_output["usage_entries"])
+            node_audit_summary.extend(field_output["node_audit_summary"])
+            if _result_has_extracted_content(field_output["result"]):
+                yield f"Verification retry produced a usable result for {item_name}; stopping retries for this field."
+                break
+            prior_result = field_output["result"]
+
+    yield {
+        "results": retried_results,
+        "events": events,
+        "usage_entries": usage_entries,
+        "node_audit_summary": node_audit_summary,
+        "token_cost_metrics": _metrics_from_usage_entries(usage_entries),
     }
 
 def build_dynamic_graph(template_payload: dict) -> Workflow:
