@@ -8,6 +8,7 @@ import os
 import sys
 import traceback
 import uuid
+from dataclasses import dataclass
 from contextlib import redirect_stderr, redirect_stdout
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -96,6 +97,171 @@ async def log_document_chunk_embedding_column_type() -> None:
 @app.on_event("startup")
 async def startup_database_introspection() -> None:
     await log_document_chunk_embedding_column_type()
+
+
+@dataclass
+class _ExtractionStreamOutcome:
+    structured_json: dict[str, Any] | None = None
+    token_cost_metrics: dict[str, Any] | None = None
+    backend_log_text: str = ""
+    error_message: str | None = None
+
+
+def _decode_sse_event(event_text: str) -> tuple[str | None, dict[str, Any] | None]:
+    """Decode one server-sent event payload emitted by the extraction stream."""
+
+    event_name: str | None = None
+    data_lines: list[str] = []
+    for line in event_text.splitlines():
+        if line.startswith("event:"):
+            event_name = line.removeprefix("event:").strip()
+        elif line.startswith("data:"):
+            data_lines.append(line.removeprefix("data:").strip())
+    if not data_lines:
+        return event_name, None
+    try:
+        return event_name, json.loads("\n".join(data_lines))
+    except json.JSONDecodeError:
+        return event_name, None
+
+
+def _observe_extraction_stream_event(event_text: str, outcome: _ExtractionStreamOutcome) -> None:
+    """Track result/error details from a child extraction stream without changing the SSE contract."""
+
+    event_name, payload = _decode_sse_event(event_text)
+    if not isinstance(payload, dict):
+        return
+    if event_name == "result":
+        structured_json = payload.get("structured_json")
+        if isinstance(structured_json, dict):
+            outcome.structured_json = structured_json
+        metrics = payload.get("token_cost_metrics")
+        if isinstance(metrics, dict):
+            outcome.token_cost_metrics = metrics
+        backend_log_text = payload.get("backend_log_text")
+        if isinstance(backend_log_text, str):
+            outcome.backend_log_text = backend_log_text
+    elif payload.get("error"):
+        backend_log_text = payload.get("backend_log_text")
+        if isinstance(backend_log_text, str):
+            outcome.backend_log_text = backend_log_text
+            outcome.error_message = backend_log_text
+        else:
+            outcome.error_message = str(payload.get("error"))
+
+
+async def _new_prisma_client():
+    from prisma import Prisma
+
+    client = Prisma()
+    await client.connect()
+    return client
+
+
+def _request_template_id(request: ExtractionRequestPayload) -> str | None:
+    payload = request.model_dump()
+    value = payload.get("id") or payload.get("template_id") or payload.get("templateId")
+    return str(value) if value else None
+
+
+async def _create_pipeline_run(run_id: str, total_files: int, request: ExtractionRequestPayload) -> None:
+    client = await _new_prisma_client()
+    try:
+        await client.execute_raw(
+            """INSERT INTO "pipeline_runs" ("id", "template_id", "status", "total_files", "processed_files")
+               VALUES ($1::uuid, $2, 'processing'::"PipelineExecutionStatus", $3, 0)""",
+            run_id,
+            _request_template_id(request),
+            total_files,
+        )
+    finally:
+        await client.disconnect()
+
+
+async def _create_file_extraction(run_id: str, file_name: str) -> str:
+    extraction_id = str(uuid.uuid4())
+    client = await _new_prisma_client()
+    try:
+        await client.execute_raw(
+            """INSERT INTO "file_extractions" ("id", "run_id", "file_name", "status", "extracted_payload", "logs", "error_message")
+               VALUES ($1::uuid, $2::uuid, $3, 'processing'::"PipelineExecutionStatus", '{}'::jsonb, '', NULL)""",
+            extraction_id,
+            run_id,
+            file_name,
+        )
+    finally:
+        await client.disconnect()
+    return extraction_id
+
+
+async def _mark_file_extraction_success(run_id: str, extraction_id: str, outcome: _ExtractionStreamOutcome) -> None:
+    metrics = outcome.token_cost_metrics or {}
+    payload = outcome.structured_json or {}
+    client = await _new_prisma_client()
+    try:
+        await client.execute_raw(
+            """UPDATE "file_extractions"
+               SET "status" = 'success'::"PipelineExecutionStatus",
+                   "extracted_payload" = $2::jsonb,
+                   "logs" = $3,
+                   "error_message" = NULL
+               WHERE "id" = $1::uuid""",
+            extraction_id,
+            json.dumps(payload, default=str),
+            outcome.backend_log_text or "",
+        )
+        await client.execute_raw(
+            """UPDATE "pipeline_runs"
+               SET "processed_files" = "processed_files" + 1,
+                   "total_input_tokens" = "total_input_tokens" + $2,
+                   "total_output_tokens" = "total_output_tokens" + $3,
+                   "total_cost_usd" = "total_cost_usd" + $4
+               WHERE "id" = $1::uuid""",
+            run_id,
+            int(metrics.get("input_tokens", 0) or 0),
+            int(metrics.get("output_tokens", 0) or 0),
+            float(metrics.get("total_cost", 0.0) or 0.0),
+        )
+    finally:
+        await client.disconnect()
+
+
+async def _mark_file_extraction_failed(extraction_id: str, error_message: str, logs: str = "") -> None:
+    client = await _new_prisma_client()
+    try:
+        await client.execute_raw(
+            """UPDATE "file_extractions"
+               SET "status" = 'failed'::"PipelineExecutionStatus",
+                   "logs" = $2,
+                   "error_message" = $3
+               WHERE "id" = $1::uuid""",
+            extraction_id,
+            logs or "",
+            error_message,
+        )
+    finally:
+        await client.disconnect()
+
+
+async def _complete_pipeline_run(run_id: str, status: str, batch_metrics: dict[str, Any]) -> None:
+    client = await _new_prisma_client()
+    try:
+        await client.execute_raw(
+            """UPDATE "pipeline_runs"
+               SET "status" = $2::"PipelineExecutionStatus",
+                   "completed_at" = NOW(),
+                   "total_input_tokens" = $3,
+                   "total_output_tokens" = $4,
+                   "total_cost_usd" = $5
+               WHERE "id" = $1::uuid""",
+            run_id,
+            status,
+            int(batch_metrics.get("input_tokens", 0) or 0),
+            int(batch_metrics.get("output_tokens", 0) or 0),
+            float(batch_metrics.get("total_cost", 0.0) or 0.0),
+        )
+    finally:
+        await client.disconnect()
 
 
 def _sse(event: str, data: dict[str, Any]) -> str:
@@ -544,36 +710,69 @@ def _write_batch_exports(batch_id: str, batch_records: list[dict[str, Any]]) -> 
 
 async def _extract_batch_stream(files: list[UploadFile], request: ExtractionRequestPayload) -> AsyncIterator[str]:
     batch_id = uuid.uuid4().hex
+    run_id = str(uuid.uuid4())
     batch_records: list[dict[str, Any]] = []
     batch_token_metrics: list[dict[str, Any] | None] = []
     total_files = len(files)
+    failed_files = 0
 
-    yield _sse("log", {"tone": "info", "status": "Batch extraction started", "message": f"Starting sequential extraction for {total_files} file(s).", "batch_id": batch_id})
+    await _create_pipeline_run(run_id, total_files, request)
+    yield _sse("log", {"tone": "info", "status": "Batch extraction started", "message": f"Starting sequential extraction for {total_files} file(s).", "batch_id": batch_id, "run_id": run_id})
 
     for index, upload in enumerate(files, start=1):
         file_name = upload.filename or f"upload_{index}.pdf"
+        file_extraction_id = await _create_file_extraction(run_id, file_name)
         progress_prefix = f"[{index}/{total_files}] "
-        yield _sse("log", {"tone": "info", "status": f"{progress_prefix}Processing file", "message": f"{progress_prefix}Processing {file_name}: Starting extraction.", "batch_id": batch_id, "file_name": file_name})
-        async for event in _extract_stream(
-            upload,
-            request,
-            batch_records=batch_records,
-            batch_token_metrics=batch_token_metrics,
-            emit_done=False,
-            progress_prefix=progress_prefix,
-            log_token_metrics=False,
-            batch_progress={"current": index, "total": total_files, "file_name": file_name},
-        ):
-            yield event
-        yield _sse("log", {"tone": "success", "status": f"{progress_prefix}Completed file", "message": f"{progress_prefix}Completed {file_name}.", "batch_id": batch_id, "file_name": file_name})
+        outcome = _ExtractionStreamOutcome()
+        yield _sse("log", {"tone": "info", "status": f"{progress_prefix}Processing file", "message": f"{progress_prefix}Processing {file_name}: Starting extraction.", "batch_id": batch_id, "run_id": run_id, "file_extraction_id": file_extraction_id, "file_name": file_name})
+        try:
+            async for event in _extract_stream(
+                upload,
+                request,
+                batch_records=batch_records,
+                batch_token_metrics=batch_token_metrics,
+                emit_done=False,
+                progress_prefix=progress_prefix,
+                log_token_metrics=False,
+                batch_progress={"current": index, "total": total_files, "file_name": file_name, "run_id": run_id, "file_extraction_id": file_extraction_id},
+            ):
+                _observe_extraction_stream_event(event, outcome)
+                yield event
+        except Exception as exc:
+            outcome.error_message = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            if batch_records is not None:
+                batch_records.append(
+                    flatten_extraction_results_for_export(
+                        file_name=file_name,
+                        extraction_status="Failed",
+                        template_payload=request.model_dump(),
+                        parsed_results={},
+                        error=str(exc),
+                    )
+                )
+            yield _sse("log", {"tone": "error", "status": f"{progress_prefix}File failed", "message": f"{progress_prefix}{file_name} failed; continuing with remaining files.", "batch_id": batch_id, "run_id": run_id, "file_extraction_id": file_extraction_id, "file_name": file_name})
+
+        if outcome.error_message or outcome.structured_json is None:
+            failed_files += 1
+            error_text = outcome.error_message or "Extraction stream ended before producing a result payload."
+            await _mark_file_extraction_failed(file_extraction_id, error_text, outcome.backend_log_text)
+            yield _sse("log", {"tone": "error", "status": f"{progress_prefix}Failed file", "message": f"{progress_prefix}Failed {file_name}; continuing batch loop.", "batch_id": batch_id, "run_id": run_id, "file_extraction_id": file_extraction_id, "file_name": file_name})
+        else:
+            await _mark_file_extraction_success(run_id, file_extraction_id, outcome)
+            yield _sse("log", {"tone": "success", "status": f"{progress_prefix}Completed file", "message": f"{progress_prefix}Completed {file_name}.", "batch_id": batch_id, "run_id": run_id, "file_extraction_id": file_extraction_id, "file_name": file_name})
         await asyncio.sleep(0)
 
     batch_metrics = combine_token_cost_metrics(batch_token_metrics)
+    batch_status = "failed" if failed_files else "success"
+    await _complete_pipeline_run(run_id, batch_status, batch_metrics)
     log_token_cost_metrics(batch_metrics, title="BEXTRACT MASTER BATCH LEDGER")
     export_info = _write_batch_exports(batch_id, batch_records)
-    yield _sse("batch_export", {"ok": True, "status": "exports_ready", "exports": export_info, "records": batch_records, "token_cost_metrics": batch_metrics, "message": f"Extraction completed successfully for {total_files}/{total_files} file(s). Compiled {len(batch_records)} row(s) into CSV and JSON batch exports."})
-    yield _sse("log", {"tone": "success", "status": "Batch extraction complete", "message": f"Extraction completed successfully for {total_files}/{total_files} file(s). Compiled {len(batch_records)} row(s) into CSV and JSON batch exports.", "exports": export_info})
-    yield _sse("done", {"ok": True, "status": "done", "batch_id": batch_id, "exports": export_info, "token_cost_metrics": batch_metrics})
+    completed_files = total_files - failed_files
+    completion_message = f"Extraction completed for {completed_files}/{total_files} file(s). Compiled {len(batch_records)} row(s) into CSV and JSON batch exports."
+    tone = "success" if batch_status == "success" else "error"
+    yield _sse("batch_export", {"ok": batch_status == "success", "status": "exports_ready", "batch_status": batch_status, "batch_id": batch_id, "run_id": run_id, "exports": export_info, "records": batch_records, "token_cost_metrics": batch_metrics, "message": completion_message})
+    yield _sse("log", {"tone": tone, "status": "Batch extraction complete", "message": completion_message, "exports": export_info, "batch_id": batch_id, "run_id": run_id})
+    yield _sse("done", {"ok": batch_status == "success", "status": "done", "batch_status": batch_status, "batch_id": batch_id, "run_id": run_id, "exports": export_info, "token_cost_metrics": batch_metrics})
 
 
 @app.get("/api/health")
