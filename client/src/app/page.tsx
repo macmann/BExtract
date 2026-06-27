@@ -411,6 +411,46 @@ function ExtractionLoadingPanel({
   );
 }
 
+function ExtractionSuccessModal({
+  onViewResults,
+}: {
+  onViewResults: () => void;
+}) {
+  return (
+    <section
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/65 p-4 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="extraction-success-title"
+    >
+      <div className="w-full max-w-md overflow-hidden rounded-3xl border border-emerald-300/40 bg-[radial-gradient(circle_at_top,rgba(16,185,129,0.18),transparent_36%),linear-gradient(135deg,rgba(15,23,42,0.98),rgba(2,6,23,0.96))] p-6 text-center shadow-2xl shadow-emerald-950/40">
+        <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full border border-emerald-200/50 bg-emerald-300/15 text-emerald-200 shadow-[0_0_32px_rgba(110,231,183,0.22)]">
+          <CheckCircle2 className="h-9 w-9" />
+        </div>
+        <p className="mt-5 text-xs font-black uppercase tracking-[0.28em] text-emerald-200">
+          Extraction successful
+        </p>
+        <h2
+          id="extraction-success-title"
+          className="mt-2 text-2xl font-black text-white"
+        >
+          Your extraction is complete.
+        </h2>
+        <p className="mt-3 text-sm leading-6 text-slate-400">
+          The results are ready on the main screen behind this confirmation.
+          Click below to return to the results view.
+        </p>
+        <button
+          onClick={onViewResults}
+          className="mt-6 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-300 px-5 py-3 text-xs font-black uppercase tracking-[0.18em] text-slate-950 transition hover:bg-emerald-200"
+        >
+          <ShieldCheck className="h-4 w-4" /> View Results
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function LogsPanel({
   logs,
   isLoading,
@@ -952,6 +992,8 @@ export default function Home() {
   const runStartedAtRef = useRef<number | null>(null);
   const [isCostMetricsOpen, setIsCostMetricsOpen] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
+  const [showExtractionSuccessModal, setShowExtractionSuccessModal] = useState(false);
+  const resultsSectionRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -1018,6 +1060,7 @@ export default function Home() {
     setExtractionApproach(template.extractionApproach);
     setExtractionResults([]);
     setBatchExportRecords([]);
+    setShowExtractionSuccessModal(false);
     setTokenCostMetrics(null);
     setBackendLogText("");
     setDebugLogText("");
@@ -1246,6 +1289,7 @@ export default function Home() {
       updateElapsedSeconds();
       abortControllerRef.current = null;
       setIsLoading(false);
+      setShowExtractionSuccessModal(false);
       return;
     }
 
@@ -1292,6 +1336,7 @@ export default function Home() {
         message || "Extraction completed successfully for all files.",
       );
       setIsLoading(false);
+      setShowExtractionSuccessModal(true);
       return;
     }
 
@@ -1334,6 +1379,7 @@ export default function Home() {
           : "Extraction completed successfully. Field cards were updated.",
       );
       setIsLoading(false);
+      setShowExtractionSuccessModal(true);
     }
   };
 
@@ -1503,6 +1549,7 @@ export default function Home() {
     setDebugRunMetrics(initialDebugRunMetrics);
     runStartedAtRef.current = null;
     setIsCostMetricsOpen(false);
+    setShowExtractionSuccessModal(false);
     setRuntimeLogs([
       {
         time: timestamp(),
@@ -1519,6 +1566,7 @@ export default function Home() {
     abortControllerRef.current?.abort();
     updateElapsedSeconds();
     setIsLoading(false);
+    setShowExtractionSuccessModal(false);
   };
 
   const handleRunExtraction = async (templateOverride?: SavedTemplate) => {
@@ -1537,6 +1585,7 @@ export default function Home() {
     setTokenCostMetrics(null);
     setBackendLogText("");
     setIsCostMetricsOpen(false);
+    setShowExtractionSuccessModal(false);
 
     const runFields = templateOverride?.fields ?? fields;
     const runTemplateName = templateOverride?.name ?? safeTemplateName();
@@ -1608,11 +1657,13 @@ export default function Home() {
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
         appendLog("warn", "Extraction cancelled by user.");
+        setShowExtractionSuccessModal(false);
       } else {
         appendLog(
           "error",
           error instanceof Error ? error.message : "Extraction request failed",
         );
+        setShowExtractionSuccessModal(false);
       }
     } finally {
       abortControllerRef.current = null;
@@ -1620,6 +1671,16 @@ export default function Home() {
     }
   };
 
+
+  const handleViewExtractionResults = () => {
+    setShowExtractionSuccessModal(false);
+    window.requestAnimationFrame(() => {
+      resultsSectionRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+  };
 
   const handleRunSavedTemplate = (template: SavedTemplate) => {
     applyTemplate(template);
@@ -1667,6 +1728,9 @@ export default function Home() {
             {toast.message}
           </div>
         </div>
+      )}
+      {showExtractionSuccessModal && (
+        <ExtractionSuccessModal onViewResults={handleViewExtractionResults} />
       )}
       {isCostMetricsOpen && tokenCostMetrics && (
         <CostMetricsModal
@@ -1795,7 +1859,8 @@ export default function Home() {
             tokenCostMetrics ||
             backendLogText) && (
             <div
-              className={`mx-auto max-w-6xl transition-all duration-700 ${isLoading ? "translate-y-2 opacity-0" : "translate-y-0 opacity-100"}`}
+              ref={resultsSectionRef}
+              className={`mx-auto max-w-6xl scroll-mt-6 transition-all duration-700 ${isLoading ? "translate-y-2 opacity-0" : "translate-y-0 opacity-100"}`}
             >
               <ResultsPanel
                 results={extractionResults}
