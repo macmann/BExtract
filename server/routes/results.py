@@ -52,6 +52,7 @@ def _normalize_file(row: dict[str, Any], *, include_payload: bool = False) -> di
         "run_id": str(row.get("run_id")),
         "file_name": row.get("file_name"),
         "status": row.get("status"),
+        "logs": row.get("logs") or "",
         "error_message": row.get("error_message"),
     }
     if include_payload:
@@ -154,7 +155,7 @@ async def get_result(run_id: str) -> dict[str, Any]:
         if run is None:
             raise HTTPException(status_code=404, detail="Pipeline run not found")
         files = await _fetch_files(client, run_id)
-        return {**_normalize_run(run), "files": [_normalize_file(file) for file in files]}
+        return {**_normalize_run(run), "files": [_normalize_file(file, include_payload=True) for file in files]}
     finally:
         await client.disconnect()
 

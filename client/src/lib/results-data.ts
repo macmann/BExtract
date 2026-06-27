@@ -3,156 +3,152 @@ export type RunStatus = "success" | "processing" | "failure";
 export type RunDocument = {
   id: string;
   fileName: string;
-  pages: number;
   status: RunStatus;
   emptyFields: string[];
   extractedFields: number;
   totalFields: number;
-  cost: number;
   logs: string[];
+  errorMessage?: string | null;
+  extractedPayload?: unknown;
 };
 
 export type HistoricalRun = {
   id: string;
   startedAt: string;
+  completedAt?: string | null;
   filesProcessed: number;
   totalFiles: number;
   totalCost: number;
   status: RunStatus;
-  model: string;
-  owner: string;
+  templateId?: string | null;
   inputTokens: number;
   outputTokens: number;
   documents: RunDocument[];
 };
 
-export const historicalRuns: HistoricalRun[] = [
-  {
-    id: "run_8f42c91a7b0e",
-    startedAt: "2026-06-27T14:18:00Z",
-    filesProcessed: 12,
-    totalFiles: 12,
-    totalCost: 7.42,
-    status: "success",
-    model: "gpt-4.1",
-    owner: "Capital Ops",
-    inputTokens: 185420,
-    outputTokens: 28440,
-    documents: [
-      {
-        id: "doc_lpa_001",
-        fileName: "Northstar Fund IV - LPA.pdf",
-        pages: 84,
-        status: "success",
-        emptyFields: [],
-        extractedFields: 18,
-        totalFields: 18,
-        cost: 1.92,
-        logs: [
-          "OCR completed with 99.1% confidence across 84 pages.",
-          "Resolved commitment, fee schedule, and waterfall sections.",
-          "Validated extracted scalar fields against source citations.",
-        ],
-      },
-      {
-        id: "doc_sub_002",
-        fileName: "Subscription Packet - Archer LP.pdf",
-        pages: 32,
-        status: "success",
-        emptyFields: [],
-        extractedFields: 12,
-        totalFields: 12,
-        cost: 0.88,
-        logs: [
-          "Detected investor profile table on pages 8-11.",
-          "Normalized EIN and domicile fields.",
-          "No null fields returned by extraction schema.",
-        ],
-      },
-      {
-        id: "doc_side_003",
-        fileName: "Side Letter - Horizon Advisors.pdf",
-        pages: 14,
-        status: "success",
-        emptyFields: ["MFN Election Window"],
-        extractedFields: 9,
-        totalFields: 10,
-        cost: 0.41,
-        logs: [
-          "MFN clause found, but no explicit election window date was present.",
-          "Returned null for MFN Election Window after citation check.",
-          "Developer note: verify pages 12-13 if source document is amended.",
-        ],
-      },
-    ],
-  },
-  {
-    id: "run_72bd4fa19c35",
-    startedAt: "2026-06-27T13:04:00Z",
-    filesProcessed: 8,
-    totalFiles: 10,
-    totalCost: 4.18,
-    status: "processing",
-    model: "gpt-4.1-mini",
-    owner: "Deal Team",
-    inputTokens: 104905,
-    outputTokens: 19220,
-    documents: [
-      {
-        id: "doc_q2_001",
-        fileName: "Q2 Capital Account Statement.pdf",
-        pages: 21,
-        status: "success",
-        emptyFields: [],
-        extractedFields: 14,
-        totalFields: 14,
-        cost: 0.72,
-        logs: ["Statement tables parsed successfully.", "NAV and unfunded commitment matched summary page."],
-      },
-      {
-        id: "doc_notice_002",
-        fileName: "Capital Call Notice - June.pdf",
-        pages: 7,
-        status: "processing",
-        emptyFields: [],
-        extractedFields: 5,
-        totalFields: 11,
-        cost: 0.19,
-        logs: ["Chunk embeddings queued.", "Awaiting final scalar extraction response from model."],
-      },
-    ],
-  },
-  {
-    id: "run_a61408ed3f99",
-    startedAt: "2026-06-26T20:45:00Z",
-    filesProcessed: 5,
-    totalFiles: 9,
-    totalCost: 2.96,
-    status: "failure",
-    model: "gpt-4.1",
-    owner: "QA Sandbox",
-    inputTokens: 76210,
-    outputTokens: 8084,
-    documents: [
-      {
-        id: "doc_scan_001",
-        fileName: "Legacy Scan - Watermarked.pdf",
-        pages: 56,
-        status: "failure",
-        emptyFields: ["Management Fee", "Commitment Amount", "Effective Date"],
-        extractedFields: 0,
-        totalFields: 15,
-        cost: 1.03,
-        logs: [
-          "OCR confidence fell below threshold on 41 pages.",
-          "Extraction returned empty strings for required financial fields.",
-          "Recommended action: rerun with enhanced OCR preprocessing.",
-        ],
-      },
-    ],
-  },
-];
+type ApiRun = {
+  id: string;
+  template_id?: string | null;
+  status?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  total_files?: number | null;
+  processed_files?: number | null;
+  total_input_tokens?: number | null;
+  total_output_tokens?: number | null;
+  total_cost_usd?: number | string | null;
+  files?: ApiFile[];
+};
 
-export function findRun(runId: string) {
-  return historicalRuns.find((run) => run.id === runId);
+type ApiFile = {
+  id: string;
+  file_name?: string | null;
+  status?: string | null;
+  logs?: string | string[] | null;
+  error_message?: string | null;
+  extracted_payload?: unknown;
+};
+
+function normalizeStatus(status?: string | null): RunStatus {
+  if (status === "success" || status === "processing" || status === "failure") return status;
+  if (status === "completed") return "success";
+  if (status === "failed" || status === "error") return "failure";
+  return "processing";
+}
+
+function numeric(value: number | string | null | undefined): number {
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+function countPayloadFields(payload: unknown): { extractedFields: number; totalFields: number; emptyFields: string[] } {
+  if (!payload || typeof payload !== "object") {
+    return { extractedFields: payload == null ? 0 : 1, totalFields: payload == null ? 0 : 1, emptyFields: [] };
+  }
+
+  let extractedFields = 0;
+  let totalFields = 0;
+  const emptyFields: string[] = [];
+
+  const visit = (value: unknown, path: string) => {
+    if (Array.isArray(value)) {
+      if (value.length === 0) {
+        totalFields += 1;
+        emptyFields.push(path);
+        return;
+      }
+      value.forEach((item, index) => visit(item, `${path}[${index}]`));
+      return;
+    }
+    if (value && typeof value === "object") {
+      const entries = Object.entries(value as Record<string, unknown>);
+      if (entries.length === 0) {
+        totalFields += 1;
+        emptyFields.push(path);
+        return;
+      }
+      entries.forEach(([key, child]) => visit(child, path ? `${path}.${key}` : key));
+      return;
+    }
+
+    totalFields += 1;
+    if (value === null || value === undefined || value === "") emptyFields.push(path);
+    else extractedFields += 1;
+  };
+
+  visit(payload, "");
+  return { extractedFields, totalFields, emptyFields: emptyFields.filter(Boolean) };
+}
+
+function normalizeLogs(logs: ApiFile["logs"]): string[] {
+  if (Array.isArray(logs)) return logs.map(String).filter(Boolean);
+  if (typeof logs === "string") return logs.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return [];
+}
+
+export function mapApiRun(apiRun: ApiRun): HistoricalRun {
+  const documents = (apiRun.files ?? []).map((file): RunDocument => {
+    const fieldCounts = countPayloadFields(file.extracted_payload);
+    return {
+      id: file.id,
+      fileName: file.file_name || file.id,
+      status: normalizeStatus(file.status),
+      logs: normalizeLogs(file.logs),
+      errorMessage: file.error_message,
+      extractedPayload: file.extracted_payload,
+      ...fieldCounts,
+    };
+  });
+
+  return {
+    id: apiRun.id,
+    startedAt: apiRun.started_at || new Date(0).toISOString(),
+    completedAt: apiRun.completed_at,
+    filesProcessed: numeric(apiRun.processed_files),
+    totalFiles: numeric(apiRun.total_files),
+    totalCost: numeric(apiRun.total_cost_usd),
+    status: normalizeStatus(apiRun.status),
+    templateId: apiRun.template_id,
+    inputTokens: numeric(apiRun.total_input_tokens),
+    outputTokens: numeric(apiRun.total_output_tokens),
+    documents,
+  };
+}
+
+export async function fetchHistoricalRuns(): Promise<HistoricalRun[]> {
+  const response = await fetch("/api/results", { cache: "no-store" });
+  if (!response.ok) throw new Error(`Failed to load results history (${response.status})`);
+  const runs = (await response.json()) as ApiRun[];
+  return runs.map(mapApiRun);
+}
+
+export async function fetchHistoricalRun(runId: string): Promise<HistoricalRun | null> {
+  const response = await fetch(`/api/results/${encodeURIComponent(runId)}`, { cache: "no-store" });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`Failed to load result ${runId} (${response.status})`);
+  return mapApiRun((await response.json()) as ApiRun);
 }
