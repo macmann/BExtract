@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Check, Clipboard, FileSearch, Search } from "lucide-react";
-import { historicalRuns, type HistoricalRun, type RunStatus } from "@/lib/results-data";
+import { fetchHistoricalRuns, type HistoricalRun, type RunStatus } from "@/lib/results-data";
 
 const statusStyles: Record<RunStatus, string> = {
   success: "border-emerald-400/30 bg-emerald-400/10 text-emerald-200",
@@ -22,10 +22,27 @@ export default function ResultsPage() {
   const router = useRouter();
   const [runs, setRuns] = useState<HistoricalRun[]>([]);
   const [copiedRunId, setCopiedRunId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => setRuns(historicalRuns), 0);
-    return () => window.clearTimeout(timer);
+    let isMounted = true;
+    fetchHistoricalRuns()
+      .then((loadedRuns) => {
+        if (!isMounted) return;
+        setRuns(loadedRuns);
+        setError(null);
+      })
+      .catch((loadError: unknown) => {
+        if (!isMounted) return;
+        setError(loadError instanceof Error ? loadError.message : "Failed to load results history.");
+      })
+      .finally(() => {
+        if (isMounted) setIsLoading(false);
+      });
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   const copyRunId = async (runId: string) => {
@@ -55,6 +72,8 @@ export default function ResultsPage() {
           </div>
         </div>
 
+        {error && <div className="mb-4 rounded-2xl border border-red-400/30 bg-red-400/10 p-4 text-sm text-red-100">{error}</div>}
+
         <div className="overflow-hidden rounded-3xl border border-slate-700/80 bg-slate-950/80 shadow-2xl shadow-black/30">
           <table className="w-full border-collapse text-left text-sm">
             <thead className="bg-slate-900/90 text-xs uppercase tracking-[0.2em] text-slate-400">
@@ -67,10 +86,16 @@ export default function ResultsPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800">
+              {!isLoading && runs.length === 0 && (
+                <tr><td colSpan={5} className="px-5 py-10 text-center text-slate-400">No extraction runs found.</td></tr>
+              )}
+              {isLoading && (
+                <tr><td colSpan={5} className="px-5 py-10 text-center text-slate-400">Loading extraction runs…</td></tr>
+              )}
               {runs.map((run) => (
                 <tr
                   key={run.id}
-                  onClick={() => router.push(`/results/${run.id}`)}
+                  onClick={() => router.push(`/results/inspector?runId=${encodeURIComponent(run.id)}`)}
                   className="group cursor-pointer transition hover:bg-cyan-300/[0.04]"
                 >
                   <td className="px-5 py-5">
