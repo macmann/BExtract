@@ -11,7 +11,7 @@ import uuid
 from contextlib import redirect_stderr, redirect_stdout
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, Optional
 
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -53,12 +53,22 @@ EXPORT_DIR = (Path(__file__).resolve().parent / "exports").resolve()
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 
+class TemplateItemPayload(BaseModel):
+    """Generic field/table configuration supplied by the template builder."""
+
+    model_config = ConfigDict(extra="allow")
+
+    example_format: Optional[str] = None
+
+
 class ExtractionRequestPayload(BaseModel):
     """Multipart JSON payload sent with an extraction request."""
 
     model_config = ConfigDict(extra="allow")
 
     approach: str = "agentic"
+    items: Optional[list[TemplateItemPayload]] = None
+    fields: Optional[list[TemplateItemPayload]] = None
 
 
 async def log_document_chunk_embedding_column_type() -> None:

@@ -321,3 +321,35 @@ def test_route_critic_result_retries_known_failed_item_id():
 
     assert event.actions.route == "retry_assets"
     assert ctx.state["extractor_critiques"] == {"assets": "Use the balance sheet value."}
+
+
+def test_pre_injected_prompt_includes_example_format_when_present():
+    from server.pipeline import _pre_injected_prompt
+
+    prompt = _pre_injected_prompt(
+        {
+            "definition": "Extract the final decision.",
+            "dataType": "String",
+            "example_format": '{"value":"Affirmed","evidence":"Page 2 rating action"}',
+        },
+        "rating_action",
+        "Rating Action",
+        "Example chunk text",
+    )
+
+    assert "[EXPECTED FORMAT EXAMPLE]" in prompt
+    assert '{"value":"Affirmed","evidence":"Page 2 rating action"}' in prompt
+    assert "Example chunk text" in prompt
+
+
+def test_pre_injected_prompt_omits_example_format_section_when_absent():
+    from server.pipeline import _pre_injected_prompt
+
+    prompt = _pre_injected_prompt(
+        {"definition": "Extract the final decision.", "dataType": "String"},
+        "rating_action",
+        "Rating Action",
+        "Example chunk text",
+    )
+
+    assert "[EXPECTED FORMAT EXAMPLE]" not in prompt
