@@ -779,7 +779,7 @@ def _pre_injected_prompt(item: dict[str, Any], item_id: str, item_name: str, chu
     item_type = str(item.get("type") or item.get("routeType") or "Scalar")
     definition = str(item.get("definition") or item.get("description") or "")
     data_type = str(item.get("dataType") or item.get("data_type") or "String")
-    return (
+    base_prompt = (
         "You are extracting one field from a document using only the retrieved evidence below.\n"
         "Return strict JSON only. Do not wrap the JSON in markdown.\n"
         "Required keys: item_id, field_name, value, unit, confidence, evidence, critique_response.\n"
@@ -788,8 +788,19 @@ def _pre_injected_prompt(item: dict[str, Any], item_id: str, item_name: str, chu
         f"Field name: {item_name}\n"
         f"Field type: {item_type}\n"
         f"Expected data type/unit: {data_type}\n"
-        f"Definition: {definition}\n\n"
-        "Retrieved document chunks:\n"
+        f"Definition: {definition}\n"
+    )
+
+    example_format = item.get("example_format")
+    if example_format:
+        base_prompt += (
+            "\nFollow this specific structural format and layout style when generating the output:\n"
+            "[EXPECTED FORMAT EXAMPLE]\n"
+            f"{example_format}\n"
+        )
+
+    return base_prompt + (
+        "\nRetrieved document chunks:\n"
         f"{chunks}\n"
     )
 
