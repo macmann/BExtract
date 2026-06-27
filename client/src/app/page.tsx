@@ -1835,29 +1835,6 @@ export default function Home() {
               </div>
             </div>
             <div className="flex flex-wrap items-center justify-end gap-2">
-              <fieldset className="flex rounded-xl border border-slate-700/80 bg-slate-950/70 p-1 shadow-inner shadow-black/20">
-                <legend className="sr-only">Extraction architecture</legend>
-                {extractionApproachOptions.map((option) => (
-                  <label
-                    key={option.value}
-                    className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-black uppercase tracking-[0.14em] transition ${
-                      extractionApproach === option.value
-                        ? "bg-cyan-300 text-slate-950 shadow-lg shadow-cyan-950/30"
-                        : "text-slate-300 hover:bg-slate-800/80 hover:text-cyan-100"
-                    }`}
-                  >
-                    <input
-                      type="radio"
-                      name="extraction-approach"
-                      value={option.value}
-                      checked={extractionApproach === option.value}
-                      onChange={() => setExtractionApproach(option.value)}
-                      className="sr-only"
-                    />
-                    {option.label}
-                  </label>
-                ))}
-              </fieldset>
               <Link
                 href="/results"
                 className="inline-flex items-center gap-2 rounded-xl border border-cyan-300/40 bg-slate-950/80 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-cyan-100 transition hover:border-cyan-200 hover:bg-cyan-300/10 hover:text-white"
@@ -1867,18 +1844,12 @@ export default function Home() {
               <button
                 onClick={() => handleRunExtraction()}
                 disabled={isLoading}
-                className="inline-flex items-center gap-2 rounded-xl bg-emerald-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-emerald-200 disabled:cursor-not-allowed disabled:opacity-60"
+                className="inline-flex items-center gap-2 rounded-xl border border-cyan-300/40 bg-slate-950/80 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-cyan-100 transition hover:border-cyan-200 hover:bg-cyan-300/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
               >
                 <Search
                   className={`h-4 w-4 ${isLoading ? "animate-pulse" : ""}`}
                 />{" "}
                 {isLoading ? "Extracting..." : "Run Extraction"}
-              </button>
-              <button
-                onClick={addField}
-                className="inline-flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-cyan-200"
-              >
-                <Plus className="h-4 w-4" /> Add Field
               </button>
             </div>
           </header>
@@ -1902,6 +1873,37 @@ export default function Home() {
             </label>
           </div>
           <UploadDropzone files={files} onFilesChange={handleFilesChange} />
+          <div className="mt-4 flex flex-col gap-3 rounded-2xl border border-slate-700/70 bg-slate-950/50 p-3 lg:flex-row lg:items-center lg:justify-between">
+            <fieldset className="flex flex-col rounded-xl border border-slate-700/80 bg-slate-950/70 p-1 shadow-inner shadow-black/20 sm:flex-row">
+              <legend className="sr-only">Extraction architecture</legend>
+              {extractionApproachOptions.map((option) => (
+                <label
+                  key={option.value}
+                  className={`cursor-pointer rounded-lg px-3 py-2 text-center text-xs font-black uppercase tracking-[0.14em] transition ${
+                    extractionApproach === option.value
+                      ? "bg-cyan-300 text-slate-950 shadow-lg shadow-cyan-950/30"
+                      : "text-slate-300 hover:bg-slate-800/80 hover:text-cyan-100"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="extraction-approach"
+                    value={option.value}
+                    checked={extractionApproach === option.value}
+                    onChange={() => setExtractionApproach(option.value)}
+                    className="sr-only"
+                  />
+                  {option.label}
+                </label>
+              ))}
+            </fieldset>
+            <button
+              onClick={addField}
+              className="inline-flex items-center justify-center gap-2 rounded-xl bg-cyan-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-cyan-200"
+            >
+              <Plus className="h-4 w-4" /> Add Field
+            </button>
+          </div>
           <ExtractionLoadingPanel
             logs={runtimeLogs}
             isLoading={isLoading}
