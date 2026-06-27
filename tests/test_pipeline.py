@@ -441,3 +441,113 @@ def test_run_pre_injected_extraction_transforms_query_without_example_format(mon
     assert "[EXPECTED FORMAT EXAMPLE]" in extraction_prompt
     assert '{"value":"Affirmed"}' in extraction_prompt
     assert events[-1]["results"]["rating_action"]["value"] == "Affirmed"
+
+
+def test_run_pre_injected_extraction_isolates_each_field_context(monkeypatch):
+    import server.pipeline as pipeline
+
+    class DummyResponse:
+        def __init__(self, text):
+            self.text = text
+
+        def model_dump(self, mode="json"):
+            return {
+                "text": self.text,
+                "usage_metadata": {
+                    "prompt_token_count": 3,
+                    "candidates_token_count": 2,
+                },
+            }
+
+    class DummyModels:
+        def __init__(self):
+            self.prompts = []
+
+        async def generate_content(self, **kwargs):
+            self.prompts.append(kwargs)
+            prompt_index = len(self.prompts)
+            if prompt_index == 1:
+                return DummyResponse("rating trigger keywords")
+            if prompt_index == 2:
+                return DummyResponse(
+                    json.dumps(
+                        {
+                            "value": "Downgrade trigger",
+                            "unit": None,
+                            "confidence": 0.95,
+                            "evidence": "Rating trigger chunk",
+                        }
+                    )
+                )
+            if prompt_index == 3:
+                return DummyResponse("capital ratio keywords")
+            return DummyResponse(
+                json.dumps(
+                    {
+                        "value": "12.5%",
+                        "unit": "%",
+                        "confidence": 0.9,
+                        "evidence": "Capital ratio chunk",
+                    }
+                )
+            )
+
+    class DummyClient:
+        models = DummyModels()
+
+    class DummyGenAI:
+        last_client = None
+
+        class Client:
+            def __init__(self, api_key=None):
+                self.aio = DummyClient()
+                DummyGenAI.last_client = self
+
+    search_calls = []
+
+    async def fake_document_hybrid_search(**kwargs):
+        search_calls.append(kwargs)
+        if kwargs["query"] == "rating trigger keywords":
+            return "Rating trigger chunk"
+        return "Capital ratio chunk"
+
+    monkeypatch.setattr(pipeline, "genai", DummyGenAI)
+    monkeypatch.setattr(pipeline, "document_hybrid_search", fake_document_hybrid_search)
+
+    async def collect_events():
+        events = []
+        async for event in pipeline.run_pre_injected_extraction(
+            "doc_1",
+            {
+                "items": [
+                    {
+                        "id": "rating_triggers",
+                        "name": "Rating triggers",
+                        "definition": "Find downgrade triggers.",
+                    },
+                    {
+                        "id": "capital_ratio",
+                        "name": "Capital ratio",
+                        "definition": "Find solvency capital ratio.",
+                    },
+                ]
+            },
+            log_final_metrics=False,
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(collect_events())
+
+    assert search_calls == [{"query": "rating trigger keywords"}, {"query": "capital ratio keywords"}]
+    prompts = [call["contents"] for call in DummyGenAI.last_client.aio.models.prompts]
+    assert "Rating triggers" in prompts[0]
+    assert "Capital ratio" not in prompts[0]
+    assert "Rating trigger chunk" in prompts[1]
+    assert "Capital ratio" not in prompts[1]
+    assert "Capital ratio" in prompts[2]
+    assert "Rating triggers" not in prompts[2]
+    assert "Capital ratio chunk" in prompts[3]
+    assert "Rating triggers" not in prompts[3]
+    assert events[-1]["results"]["rating_triggers"]["value"] == "Downgrade trigger"
+    assert events[-1]["results"]["capital_ratio"]["value"] == "12.5%"
