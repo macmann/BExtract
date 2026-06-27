@@ -775,6 +775,21 @@ async def workflow_progress(template_payload: dict[str, Any]) -> AsyncIterator[d
         yield {"status": f"Processing {item_name}", "item": item_name, "index": index}
 
 
+
+def _query_generation_prompt(field: Any) -> str:
+    """Build a domain-agnostic prompt for concise retrieval keyword generation."""
+
+    field_name = str(getattr(field, "name", "") or (field.get("name", "") if isinstance(field, dict) else ""))
+    field_definition = str(
+        getattr(field, "definition", "") or (field.get("definition", "") if isinstance(field, dict) else "")
+    )
+    return (
+        f"You are an expert search query generator. Based on the target field '{field_name}' "
+        f"and its definition '{field_definition}', generate a 3 to 5 word concise search query "
+        "to find this exact information in the source document. Ignore instruction verbs like "
+        "'summarise', 'format', or 'extract'. Return ONLY the keywords."
+    )
+
 def _pre_injected_prompt(item: dict[str, Any], item_id: str, item_name: str, chunks: str) -> str:
     item_type = str(item.get("type") or item.get("routeType") or "Scalar")
     definition = str(item.get("definition") or item.get("description") or "")
