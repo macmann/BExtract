@@ -10,15 +10,16 @@ This document is written for technical architects and technical investors. It fo
 
 BExtractor runs as a **FastAPI monolith**. The same backend process serves the static Next.js frontend, exposes the extraction API, parses PDFs, indexes document chunks, builds a Google ADK workflow, streams execution progress with Server-Sent Events (SSE), and commits the final validated JSON to PostgreSQL.
 
-The platform is easiest to understand as five connected layers:
+The platform is easiest to understand as six connected layers:
 
 | Layer | What it contains | Main responsibility |
 | --- | --- | --- |
-| 1. Experience | Next.js static UI | Template builder, PDF upload, live progress logs, and final extraction review. |
-| 2. API / Orchestration | FastAPI, SSE, ADK workflow runner, optional pre-injected RAG runner | Request handling, workflow construction, progress streaming, token/cost auditing, and result delivery. |
+| 1. Experience | Next.js static UI | Template builder, multi-file PDF upload, live progress logs, final extraction review, and historical run inspection. |
+| 2. API / Orchestration | FastAPI, SSE, ADK workflow runner, optional pre-injected RAG runner | Request handling, batch setup, workflow construction, progress streaming, token/cost auditing, and result delivery. |
 | 3. Document Intelligence | PyPDF2 PDF text extraction, chunking, embeddings, hybrid search | Converts PDF text-layer content into retrievable evidence chunks. |
 | 4. Agent Runtime | Scalar extractor, tabular extractor, critic agent | Performs extraction, validates the payload, and retries failed items. |
-| 5. Persistence | PostgreSQL, Prisma, `pgvector` | Stores templates, chunks, vectors, raw text, and validated structured JSON. |
+| 5. Persistence | PostgreSQL, Prisma, `pgvector` | Stores templates, chunks, vectors, raw text, validated structured JSON, batch runs, and per-file extraction history. |
+| 6. Results Operations | Results API, inspector UI, downloadable exports | Lists prior pipeline runs, inspects file-level logs and empty fields, deletes runs, and streams JSON/CSV/log artifacts. |
 
 ### Component Flow Chart
 
@@ -36,7 +37,7 @@ The platform is easiest to understand as five connected layers:
 +------------+-------------+
              |
              | POST /api/extract
-             | PDF + template JSON
+             | files[] + template JSON
              v
 +---------------------------------------------------------------+
 | FastAPI Monolith                                              |
@@ -73,34 +74,49 @@ The platform is easiest to understand as five connected layers:
 | Component | Implementation | Responsibility |
 | --- | --- | --- |
 | Browser UI | Next.js static export | Template configuration, PDF upload, execution monitoring, and rendered extraction output. |
-| API server | FastAPI | Serves static UI, receives extraction requests, streams SSE logs, invokes ingestion, executes ADK workflow, and returns final JSON. |
+| API server | FastAPI | Serves static UI, receives one-or-more-file extraction requests, streams SSE logs, invokes ingestion, executes ADK workflow, records run history, and returns final JSON. |
 | PDF ingestion | `server/ingestion.py` with PyPDF2 | Opens uploaded PDF bytes with `PdfReader`, extracts page text with `page.extract_text()`, creates overlapping chunks, generates embeddings, and writes chunks to `DocumentChunk`. |
 | Vector database | PostgreSQL with `pgvector` | Stores chunk text, metadata, and 3072-dimensional embeddings for semantic retrieval. |
-| Relational data store | PostgreSQL + Prisma | Stores templates, extraction results, raw text, chunk metadata, and final structured JSON. |
+| Relational data store | PostgreSQL + Prisma | Stores templates, extraction results, raw text, chunk metadata, final structured JSON, pipeline run summaries, and file-level extraction records. |
 | Hybrid search tool | `server/custom_tools.py` | Combines dense vector search, BM25 sparse search, and Reciprocal Rank Fusion. |
 | Agent workflow | Google ADK `Workflow` | Dynamically creates extraction nodes from the submitted template and routes validation/retry behavior for the default agentic path. |
 | Pre-injected RAG runner | Direct Gemini generation with retrieved chunks | Optional stateless extraction path that retrieves evidence first, injects it into a per-field prompt, and records the same token/cost audit shape. |
-| Runtime observability | SSE, captured backend logs, token/cost audit ledger | Streams user-facing progress, exports troubleshooting logs, and reports per-node token usage and estimated cost. |
+| Runtime observability | SSE, captured backend logs, token/cost audit ledger, results inspector | Streams user-facing progress, persists troubleshooting logs, exports logs, and reports per-node and batch-level token usage and estimated cost. |
 | LLM agents | Gemini via Google ADK | Scalar extraction, tabular extraction, and critic validation. |
 
 ## End-to-End Extraction Flow
 
-The extraction run has two major phases: **index the uploaded PDF**, then **run extraction against the indexed evidence**. Indexing currently starts with PyPDF2 text-layer extraction before chunking; the system does not chunk raw PDF bytes directly. The default `agentic` approach uses the dynamic Google ADK workflow. A second pre-injected RAG approach can run stateless per-field Gemini calls after hybrid retrieval has selected the evidence chunks.
+The extraction run has three major phases: **create a batch run**, **index each uploaded PDF**, then **run extraction against the indexed evidence**. Indexing currently starts with PyPDF2 text-layer extraction before chunking; the system does not chunk raw PDF bytes directly. The default `agentic` approach uses the dynamic Google ADK workflow. A second pre-injected RAG approach can run stateless per-field Gemini calls after hybrid retrieval has selected the evidence chunks.
 
 ```text
 PHASE 1 - INDEX THE DOCUMENT
 
 User
   |
-  | 1. Configure template and upload PDF
+  | 1. Configure template and upload one or more PDFs
   v
 Next.js UI
   |
-  | 2. POST PDF + template JSON to /api/extract
+  | 2. POST files[] + template JSON to /api/extract
+  |
+  +-- create PipelineRun
+  +-- for each uploaded file:
+  |     +-- create FileExtraction(processing)
+  |     +-- ingest, extract, verify, commit ExtractionResult
+  |     +-- update FileExtraction(success/failed, payload/logs/error)
+  +-- update PipelineRun(success/failed, processed_files, token totals, cost)
+  +-- emit batch_export with CSV/JSON export links
+
+/api/results
+  |
+  +-- GET /api/results                 -> run history
+  +-- GET /api/results/{run_id}        -> run + file payload/log details
+  +-- DELETE /api/results/{run_id}     -> cascade-delete run files
+  +-- GET /api/results/{run_id}/download?format=json|csv|logs
   v
 FastAPI
   |
-  | 3. Read upload, derive document_id, open SSE stream
+  | 3. Create PipelineRun, create FileExtraction per file, open SSE stream
   v
 PDF ingestion pipeline
   |
@@ -124,7 +140,7 @@ PHASE 2 - EXTRACT, VALIDATE, AND COMMIT
 
 FastAPI
   |
-  | 8. Choose extraction approach from payload
+  | 8. Process each file sequentially and choose extraction approach from payload
   |    - agentic: build Google ADK workflow from template items
   |    - pre-injected: retrieve chunks first and call Gemini per item
   v
@@ -170,7 +186,7 @@ Commit final JSON to database
   v
 Next.js UI
   |
-  | 17. Receive final SSE result and done event
+  | 17. Receive per-file result events, batch_export event, and done event
   v
 User reviews structured extraction output
 ```
@@ -185,6 +201,8 @@ User reviews structured extraction output
 - Retry attempts intentionally change search angle by using synonyms, nearby labels, abbreviations, and table headers; each retry expands the retrieval budget and records token/cost audit entries for both query transformation and extraction calls.
 - Agentic execution now emits heartbeat SSE logs while the ADK workflow is still running, so long-running critic/extractor runs remain visible in the browser.
 - Current limitation: PyPDF2 does not provide OCR for scanned/image-only PDFs; those files need an embedded text layer or an OCR preprocessing enhancement.
+- Batch extraction now persists `PipelineRun` and `FileExtraction` records, aggregates token/cost totals, and continues processing remaining files when an individual file fails.
+- A new results API and static Next.js results area provide historical run listing, run inspection, deletion, and downloadable JSON, CSV, and log artifacts.
 
 ## Document Processing Pipeline
 
@@ -193,7 +211,7 @@ The document processing pipeline has clear subsystem ownership. Each step transf
 | Step | Owner | Input | Output | Why it matters |
 | ---: | --- | --- | --- | --- |
 | 1 | Next.js UI | User-defined fields/tables and PDF | Multipart form payload | Keeps extraction schema dynamic and user-configurable. |
-| 2 | FastAPI | Multipart form payload | `document_id`, `file_name`, uploaded bytes | Establishes the extraction run identity. |
+| 2 | FastAPI | Multipart form payload | `PipelineRun`, `FileExtraction` rows, `document_id`, `file_name`, uploaded bytes | Establishes batch-level and file-level extraction identity. |
 | 3 | PDF ingestion | PDF bytes | Page-level text extracted by PyPDF2 | Converts the PDF text layer into machine-readable text before any chunking occurs. |
 | 4 | Chunker | Extracted page text | Overlapping text chunks | Preserves local context while keeping retrieval units small; raw PDF bytes are not chunked directly. |
 | 5 | Embedding generator | Chunk text | 3072-dimensional vector | Enables semantic search over document evidence. |
@@ -202,7 +220,8 @@ The document processing pipeline has clear subsystem ownership. Each step transf
 | 8 | Extractor agents | Item definition and retrieved context | Strict JSON value/table rows | Produces structured extraction output. |
 | 9 | Critic agent / audit layer | Compiled payload and model events | Pass/fail decision, optional critique, token/cost metrics | Adds quality control, targeted retry, and operational cost visibility. |
 | 10 | Empty-result verifier | Missing/empty normalized results | Retried field results plus retry audit metrics | Recovers fields that were missed because first-pass retrieval or context was too narrow. |
-| 11 | Commit node | Validated and retry-augmented payload | `ExtractionResult` row | Stores final result for downstream review and integration. |
+| 11 | Commit node | Validated and retry-augmented payload | `ExtractionResult` row and successful `FileExtraction` payload/log updates | Stores final result for downstream review, historical inspection, and integration. |
+| 12 | Results/export layer | Completed batch records and persisted run rows | `/api/results` responses, downloadable JSON/CSV/log streams, `/exports` batch files | Gives operators durable history, auditability, and offline artifacts. |
 
 ### Pipeline Flow Chart
 
@@ -252,12 +271,27 @@ The document processing pipeline has clear subsystem ownership. Each step transf
 
 ## Extraction Approach Selection and Observability
 
-The API accepts an `approach` or `extractionApproach` value in the template payload. When the value is `agentic`, FastAPI builds the dynamic ADK workflow, executes it through the ADK `Runner`, normalizes returned item results, and routes the critic result to either a targeted retry or database commit. When the value is anything else, the backend runs the pre-injected RAG path: each template item calls hybrid search first, the retrieved evidence is embedded directly into a strict JSON prompt, and Gemini returns one normalized item result at a time.
+The API accepts one or more uploaded PDFs plus an `approach` or `extractionApproach` value in the template payload. When the value is `agentic`, FastAPI builds the dynamic ADK workflow, executes it through the ADK `Runner`, normalizes returned item results, and routes the critic result to either a targeted retry or database commit. When the value is anything else, the backend runs the pre-injected RAG path: each template item calls hybrid search first, the retrieved evidence is embedded directly into a strict JSON prompt, and Gemini returns one normalized item result at a time.
 
-Both paths share the same ingestion, retrieval scope, result normalization, database commit, and SSE response envelope. The response includes `token_cost_metrics`, `node_audit_summary`, `backend_log_text`, and `backend_log_lines` so operators can inspect token usage, estimated cost, node-level activity, and captured backend diagnostics from the browser.
+Both paths share the same ingestion, retrieval scope, result normalization, database commit, file-history updates, and SSE response envelope. The response includes `token_cost_metrics`, `node_audit_summary`, `backend_log_text`, and `backend_log_lines` so operators can inspect token usage, estimated cost, node-level activity, and captured backend diagnostics from the browser.
 
 ```text
 /api/extract
+  |
+  +-- create PipelineRun
+  +-- for each uploaded file:
+  |     +-- create FileExtraction(processing)
+  |     +-- ingest, extract, verify, commit ExtractionResult
+  |     +-- update FileExtraction(success/failed, payload/logs/error)
+  +-- update PipelineRun(success/failed, processed_files, token totals, cost)
+  +-- emit batch_export with CSV/JSON export links
+
+/api/results
+  |
+  +-- GET /api/results                 -> run history
+  +-- GET /api/results/{run_id}        -> run + file payload/log details
+  +-- DELETE /api/results/{run_id}     -> cascade-delete run files
+  +-- GET /api/results/{run_id}/download?format=json|csv|logs
   |
   v
 [Index PDF chunks once]
@@ -546,6 +580,29 @@ DocumentChunk
   chunk_text     retrieval text
   embedding      pgvector vector(3072)
   metadata       page/chunk metadata JSON
+
+PipelineRun
+  id                 UUID primary key
+  template_id         optional template identifier from request payload
+  status              processing / success / failed
+  started_at          batch start timestamp
+  completed_at        batch completion timestamp
+  total_files         number of uploaded files in the batch
+  processed_files     successfully processed file count
+  total_input_tokens  aggregate input tokens
+  total_output_tokens aggregate output tokens
+  total_cost_usd      aggregate estimated model cost
+       |
+       | one pipeline run owns many file extraction records
+       v
+FileExtraction
+  id                 UUID primary key
+  run_id             foreign key to PipelineRun with cascade delete
+  file_name          uploaded PDF name
+  status             processing / success / failed
+  extracted_payload  per-file structured payload JSON
+  logs               captured backend troubleshooting log text
+  error_message      failure details when extraction fails
 ```
 
 ## Repository Structure and Ownership
@@ -559,7 +616,8 @@ BExtract/
 |   +-- src/app/globals.css         Global styles
 |
 +-- server/                         Extraction runtime
-|   +-- main.py                     FastAPI, SSE, static serving, /api/extract
+|   +-- main.py                     FastAPI, batch/SSE streaming, static serving, /api/extract
+|   +-- routes/results.py           Historical results, delete, and download endpoints
 |   +-- ingestion.py                PDF parsing, chunking, embeddings, pgvector inserts
 |   +-- pipeline.py                 ADK agents, dynamic graph, critic, commit node
 |   +-- custom_tools.py             Hybrid search: pgvector + BM25 + RRF
@@ -577,17 +635,18 @@ BExtract/
 ## Extraction Walkthrough
 
 1. **Template creation**: The UI sends fields/tables as JSON. Each item includes a name, type, definition, and optional data type.
-2. **PDF ingestion**: The backend reads the uploaded PDF, uses PyPDF2 to extract page text from the PDF text layer, and splits each page of extracted text into overlapping chunks.
-3. **Embedding and indexing**: Each chunk is embedded with Google's embedding model and stored in PostgreSQL with `pgvector`.
-4. **Workflow construction**: The backend creates a Google ADK workflow. For each template item, it adds prepare, extractor, and collect nodes.
-5. **Context retrieval**: Each extractor calls `document_hybrid_search` with the item name and definition.
-6. **Hybrid ranking**: The search tool runs pgvector nearest-neighbor search, BM25 keyword ranking, and RRF fusion.
-7. **Strict JSON extraction**: Scalar and tabular agents return constrained JSON with values/rows, confidence, evidence, and critique response.
-8. **Compilation**: Individual results are collected into a single payload keyed by template item ID.
-9. **Critic validation**: The critic checks cross-field consistency, accounting equations, subtotals, date ranges, formatting, and template compliance.
-10. **Critic retry or pass**: Failed items are routed back through their extractor with critique; passing payloads proceed toward finalization.
-11. **Empty-result verification**: Missing or unusable item outputs are retried up to three times with alternate query generation, expanded context, and isolated strict-JSON extraction.
-12. **Commit and client update**: The API streams progress and final structured JSON back to the browser over SSE.
+2. **Batch setup**: The backend creates a `PipelineRun` for the request and a `FileExtraction` record for each uploaded PDF.
+3. **PDF ingestion**: The backend reads each uploaded PDF, uses PyPDF2 to extract page text from the PDF text layer, and splits each page of extracted text into overlapping chunks.
+4. **Embedding and indexing**: Each chunk is embedded with Google's embedding model and stored in PostgreSQL with `pgvector`.
+5. **Workflow construction**: The backend creates a Google ADK workflow. For each template item, it adds prepare, extractor, and collect nodes.
+6. **Context retrieval**: Each extractor calls `document_hybrid_search` with the item name and definition.
+7. **Hybrid ranking**: The search tool runs pgvector nearest-neighbor search, BM25 keyword ranking, and RRF fusion.
+8. **Strict JSON extraction**: Scalar and tabular agents return constrained JSON with values/rows, confidence, evidence, and critique response.
+9. **Compilation**: Individual results are collected into a single payload keyed by template item ID.
+10. **Critic validation**: The critic checks cross-field consistency, accounting equations, subtotals, date ranges, formatting, and template compliance.
+11. **Critic retry or pass**: Failed items are routed back through their extractor with critique; passing payloads proceed toward finalization.
+12. **Empty-result verification**: Missing or unusable item outputs are retried up to three times with alternate query generation, expanded context, and isolated strict-JSON extraction.
+13. **Commit and client update**: The API commits the `ExtractionResult`, updates `FileExtraction` status/payload/logs, updates the parent `PipelineRun`, and streams per-file results plus batch export links back to the browser over SSE.
 
 ## Technical Investor Notes
 

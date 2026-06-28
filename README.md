@@ -12,7 +12,7 @@ BExtractor is designed for documents where accuracy, traceability, and table int
 - **Layout-aware document parsing:** Complex grids and repeated rows are preserved as intact Markdown-style table content so downstream extraction avoids row fragmentation.
 - **Agentic extraction and validation:** Specialized LLM agents extract scalar values and tables, while a critic agent checks formatting, accounting relationships, and mathematical consistency before database insertion.
 - **Relational persistence:** Validated extraction payloads, raw text, chunks, metadata, embeddings, and template associations are stored in PostgreSQL through Prisma.
-- **Operational visibility:** The backend streams extraction progress to the frontend with Server-Sent Events so users can follow the workflow node-by-node.
+- **Operational visibility:** The backend streams extraction progress to the frontend with Server-Sent Events so users can follow the workflow node-by-node, records batch-level execution history, and exposes downloadable JSON, CSV, and troubleshooting logs.
 
 ## Architecture Overview
 
@@ -37,8 +37,8 @@ Neon Serverless PostgreSQL + pgvector
 
 | Layer | Technology | Purpose |
 | --- | --- | --- |
-| Frontend | Next.js App Router, static export, Tailwind CSS, Lucide React | Browser UI for template configuration, document upload, and execution monitoring. |
-| Backend | Python, FastAPI, Uvicorn | Single web service that serves the static frontend and handles API/SSE extraction logic. |
+| Frontend | Next.js App Router, static export, Tailwind CSS, Lucide React | Browser UI for template configuration, multi-file document upload, execution monitoring, and historical results inspection. |
+| Backend | Python, FastAPI, Uvicorn | Single web service that serves the static frontend and handles API/SSE extraction, batch orchestration, results history, and export routes. |
 | Agent Orchestration | Google Agent Development Kit (ADK 2.0) | Graph-based multi-agent extraction, critique, retry, and persistence workflow. |
 | Database | Neon Serverless PostgreSQL, Prisma ORM with Python Client | Relational storage for templates, extraction results, chunks, metadata, and vector embeddings. |
 | RAG & Search | PyPDF2, `pgvector`, Google `gemini-embedding-001`, `rank_bm25`, Reciprocal Rank Fusion (RRF) | Text-layer PDF extraction, overlapping chunk indexing, and hybrid retrieval using dense semantic search plus sparse keyword search. |
@@ -83,9 +83,22 @@ BExtractor uses a multi-agent loop instead of a one-shot extraction call:
 
 This design catches issues such as subtotal mismatches, malformed dates, inconsistent ranges, or accounting equations that do not balance.
 
+### Batch Execution, Results History, and Exports
+
+The extraction endpoint accepts one or more PDF files in the same multipart request. FastAPI creates a `PipelineRun` record for the batch and a `FileExtraction` record for each uploaded file, then processes the files sequentially so one failed document does not stop the rest of the batch. Each file record stores status, extracted payload, backend troubleshooting logs, and error details when applicable. The batch record aggregates processed-file counts, token usage, output tokens, and total estimated cost.
+
+The frontend now includes a historical results area at `/results` and a per-run inspector at `/results/inspector?runId=...`. Users can review prior runs, copy run IDs, delete old runs, inspect document-level empty fields and logs, and download run artifacts. The results API supports:
+
+- `GET /api/results` - list historical pipeline runs, newest first.
+- `GET /api/results/{run_id}` - return a run with child file extraction records and payloads.
+- `DELETE /api/results/{run_id}` - delete a run and its cascaded file extraction records.
+- `GET /api/results/{run_id}/download?format=json|csv|logs` - stream extracted payloads or logs for offline review.
+
+The active extraction stream also emits a `batch_export` event when all files finish. The server writes batch-level CSV and JSON exports under `server/exports` and serves them from `/exports`.
+
 ### Real-Time Execution Logs
 
-The API streams extraction progress as Server-Sent Events. The frontend can display live status updates such as document ingestion, graph construction, item processing, critic validation, database commit, and completion.
+The API streams extraction progress as Server-Sent Events. The frontend can display live status updates such as document ingestion, graph construction, item processing, critic validation, database commit, per-file batch progress, export generation, and completion.
 
 ## Repository Structure
 
@@ -104,10 +117,12 @@ BExtract/
 │       └── app/
 │           ├── layout.tsx    # App Router root layout
 │           ├── page.tsx      # Main BExtractor UI
+│           ├── results/      # Historical run list and per-run inspector UI
 │           └── globals.css   # Tailwind/global styles
 └── server/
     ├── __init__.py
-    ├── main.py               # FastAPI app, API routes, SSE streaming, static frontend serving
+    ├── main.py               # FastAPI app, API routes, batch/SSE streaming, static frontend serving
+    ├── routes/results.py     # Historical results, delete, and download endpoints
     ├── pipeline.py           # Google ADK multi-agent extraction graph and DB commit nodes
     ├── ingestion.py          # PDF parsing, chunking, embedding generation, pgvector persistence
     ├── custom_tools.py       # Hybrid search tool: pgvector + BM25 + RRF
@@ -200,7 +215,11 @@ http://localhost:8000
 Useful API endpoints:
 
 - `GET /api/health` - health check for the BExtractor API.
-- `POST /api/extract` - multipart document extraction endpoint that streams Server-Sent Events.
+- `POST /api/extract` - multipart one-or-more document extraction endpoint that streams Server-Sent Events.
+- `GET /api/results` - historical pipeline run list.
+- `GET /api/results/{run_id}` - detailed run inspector payload.
+- `GET /api/results/{run_id}/download?format=json|csv|logs` - run export downloads.
+- `DELETE /api/results/{run_id}` - delete a historical run and file records.
 
 ## Deployment on Render
 
@@ -238,22 +257,26 @@ NODE_VERSION=20
 - Clarified that chunking operates on page-level extracted text with overlapping windows, not directly on raw PDF bytes.
 - Updated retrieval documentation to reference the current `gemini-embedding-001` embedding model and 3072-dimensional pgvector storage.
 - Documented the current limitation that image-only PDFs need an embedded text layer or future OCR preprocessing.
+- Documented multi-file batch extraction, `PipelineRun` / `FileExtraction` persistence, the `/results` UI, and JSON/CSV/log exports.
 
 ## Data Flow
 
 ```text
 1. User defines scalar and tabular extraction fields in the UI.
-2. User uploads a PDF and starts extraction.
-3. FastAPI reads the upload and passes the PDF bytes to the ingestion pipeline.
-4. PyPDF2 extracts text page-by-page before chunking.
-5. Page text is split into overlapping retrieval chunks.
-6. Chunks are embedded with Google gemini-embedding-001 and stored in pgvector.
-7. Extractor agents call the hybrid search tool for relevant context.
-8. Dense vector matches and sparse BM25 matches are fused with RRF.
-9. Scalar and tabular agents produce structured JSON.
-10. The critic agent validates the compiled payload.
-11. Failed items are retried with critique; passing payloads are committed.
-12. The frontend receives real-time SSE logs and the final structured result.
+2. User uploads one or more PDFs and starts extraction.
+3. FastAPI creates a PipelineRun plus one FileExtraction row per uploaded file.
+4. For each file, FastAPI reads the upload and passes the PDF bytes to the ingestion pipeline.
+5. PyPDF2 extracts text page-by-page before chunking.
+6. Page text is split into overlapping retrieval chunks.
+7. Chunks are embedded with Google gemini-embedding-001 and stored in pgvector.
+8. Extractor agents call the hybrid search tool for relevant context.
+9. Dense vector matches and sparse BM25 matches are fused with RRF.
+10. Scalar and tabular agents produce structured JSON.
+11. The critic agent validates the compiled payload.
+12. Failed items are retried with critique; empty outputs can be retried by the verifier.
+13. Passing payloads are committed to ExtractionResult and mirrored into FileExtraction history.
+14. The frontend receives per-file SSE results, batch export links, and the final done event.
+15. Users can revisit runs from /results, inspect logs, delete runs, or download JSON/CSV/log exports.
 ```
 
 ## Development Notes
