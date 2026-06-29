@@ -36,6 +36,10 @@ type RouteType = "Scalar" | "Tabular";
 type DataType = "String" | "Float" | "Date" | "Text Summary";
 type ExtractionApproach = "pre_injected" | "agentic";
 
+type RuntimeSettings = {
+  emptyResultsMaxRetries: number;
+};
+
 type FieldCard = {
   id: number;
   name: string;
@@ -81,6 +85,7 @@ type SavedTemplate = {
   name: string;
   fields: FieldCard[];
   extractionApproach: ExtractionApproach;
+  runtimeSettings: RuntimeSettings;
   updatedAt: string;
 };
 
@@ -90,6 +95,8 @@ type TemplateImportPayload = {
   fields?: Partial<FieldCard>[];
   items?: Partial<FieldCard>[];
   extractionApproach?: ExtractionApproach;
+  runtimeSettings?: Partial<RuntimeSettings>;
+  emptyResultsMaxRetries?: number;
   updatedAt?: string;
 };
 
@@ -100,6 +107,18 @@ type ToastState = {
 };
 
 const TEMPLATE_STORAGE_KEY = "bextract.savedTemplates";
+const DEFAULT_EMPTY_RESULTS_MAX_RETRIES = 3;
+const MIN_EMPTY_RESULTS_MAX_RETRIES = 0;
+const MAX_EMPTY_RESULTS_MAX_RETRIES = 10;
+
+const clampEmptyResultsMaxRetries = (value: unknown): number => {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed)) return DEFAULT_EMPTY_RESULTS_MAX_RETRIES;
+  return Math.min(
+    MAX_EMPTY_RESULTS_MAX_RETRIES,
+    Math.max(MIN_EMPTY_RESULTS_MAX_RETRIES, Math.trunc(parsed)),
+  );
+};
 
 const initialFields: FieldCard[] = [
   {
@@ -672,6 +691,74 @@ function CostMetricsModal({
   );
 }
 
+function RuntimeSettingsModal({
+  settings,
+  onChange,
+  onClose,
+}: {
+  settings: RuntimeSettings;
+  onChange: (settings: RuntimeSettings) => void;
+  onClose: () => void;
+}) {
+  const updateEmptyResultsMaxRetries = (value: string) => {
+    onChange({
+      ...settings,
+      emptyResultsMaxRetries: clampEmptyResultsMaxRetries(value),
+    });
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="runtime-settings-title"
+    >
+      <div className="w-full max-w-md overflow-hidden rounded-3xl border border-cyan-300/30 bg-slate-950 shadow-2xl shadow-cyan-950/40">
+        <div className="flex items-start justify-between border-b border-slate-800 bg-cyan-300/10 p-5">
+          <div>
+            <p className="text-xs font-black uppercase tracking-[0.24em] text-cyan-200">
+              Runtime Settings
+            </p>
+            <h2
+              id="runtime-settings-title"
+              className="mt-2 text-xl font-black text-white"
+            >
+              Extraction retry controls
+            </h2>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded-lg p-2 text-slate-400 transition hover:bg-slate-800 hover:text-slate-100"
+            aria-label="Close runtime settings"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+        <div className="space-y-4 p-5">
+          <label className="block rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
+            <span className="text-xs font-black uppercase tracking-[0.18em] text-slate-300">
+              Empty Results Max Retry
+            </span>
+            <input
+              type="number"
+              min={MIN_EMPTY_RESULTS_MAX_RETRIES}
+              max={MAX_EMPTY_RESULTS_MAX_RETRIES}
+              step={1}
+              value={settings.emptyResultsMaxRetries}
+              onChange={(event) => updateEmptyResultsMaxRetries(event.target.value)}
+              className="mt-3 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm font-bold text-cyan-100 outline-none transition focus:border-cyan-300"
+            />
+            <p className="mt-2 text-xs text-slate-500">
+              Controls how many times null or empty extracted fields are retried before returning the final payload.
+            </p>
+          </label>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ResultsPanel({
   results,
   tokenCostMetrics,
@@ -1026,13 +1113,24 @@ export default function Home() {
       const parsedTemplates = JSON.parse(storedTemplates) as SavedTemplate[];
       if (!Array.isArray(parsedTemplates)) return [];
 
-      return parsedTemplates.filter(
-        (template) =>
-          template &&
-          typeof template.id === "string" &&
-          typeof template.name === "string" &&
-          Array.isArray(template.fields),
-      );
+      return parsedTemplates
+        .filter(
+          (template) =>
+            template &&
+            typeof template.id === "string" &&
+            typeof template.name === "string" &&
+            Array.isArray(template.fields),
+        )
+        .map((template) => ({
+          ...template,
+          extractionApproach:
+            template.extractionApproach === "agentic" ? "agentic" : "pre_injected",
+          runtimeSettings: {
+            emptyResultsMaxRetries: clampEmptyResultsMaxRetries(
+              template.runtimeSettings?.emptyResultsMaxRetries,
+            ),
+          },
+        }));
     } catch {
       return [];
     }
@@ -1040,6 +1138,9 @@ export default function Home() {
   const [activeTemplateId, setActiveTemplateId] = useState<string | null>(null);
   const [extractionApproach, setExtractionApproach] =
     useState<ExtractionApproach>("pre_injected");
+  const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSettings>({
+    emptyResultsMaxRetries: DEFAULT_EMPTY_RESULTS_MAX_RETRIES,
+  });
   const [tokenCostMetrics, setTokenCostMetrics] =
     useState<TokenCostMetrics | null>(null);
   const [backendLogText, setBackendLogText] = useState("");
@@ -1048,6 +1149,7 @@ export default function Home() {
   );
   const runStartedAtRef = useRef<number | null>(null);
   const [isCostMetricsOpen, setIsCostMetricsOpen] = useState(false);
+  const [isRuntimeSettingsOpen, setIsRuntimeSettingsOpen] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
   const [showExtractionSuccessModal, setShowExtractionSuccessModal] = useState(false);
   const resultsSectionRef = useRef<HTMLDivElement | null>(null);
@@ -1115,6 +1217,11 @@ export default function Home() {
     setTemplateName(template.name);
     setFields(template.fields.map((field) => ({ ...field })));
     setExtractionApproach(template.extractionApproach);
+    setRuntimeSettings({
+      emptyResultsMaxRetries: clampEmptyResultsMaxRetries(
+        template.runtimeSettings?.emptyResultsMaxRetries,
+      ),
+    });
     setExtractionResults([]);
     setBatchExportRecords([]);
     setShowExtractionSuccessModal(false);
@@ -1131,6 +1238,7 @@ export default function Home() {
       name: normalizedName,
       fields: fields.map((field) => ({ ...field })),
       extractionApproach,
+      runtimeSettings,
       updatedAt: new Date().toISOString(),
     };
 
@@ -1151,6 +1259,7 @@ export default function Home() {
     name: template.name,
     fields: template.fields.map((field) => ({ ...field })),
     extractionApproach: template.extractionApproach,
+    runtimeSettings: template.runtimeSettings,
     updatedAt: template.updatedAt,
   });
 
@@ -1210,6 +1319,13 @@ export default function Home() {
         fields: importedFields,
         extractionApproach:
           payload.extractionApproach === "agentic" ? "agentic" : "pre_injected",
+        runtimeSettings: {
+          emptyResultsMaxRetries: clampEmptyResultsMaxRetries(
+            payload.runtimeSettings?.emptyResultsMaxRetries ??
+              payload.emptyResultsMaxRetries ??
+              targetTemplate?.runtimeSettings?.emptyResultsMaxRetries,
+          ),
+        },
         updatedAt: new Date().toISOString(),
       };
 
@@ -1647,6 +1763,7 @@ export default function Home() {
     const runFields = templateOverride?.fields ?? fields;
     const runTemplateName = templateOverride?.name ?? safeTemplateName();
     const runApproach = templateOverride?.extractionApproach ?? extractionApproach;
+    const runRuntimeSettings = templateOverride?.runtimeSettings ?? runtimeSettings;
 
     const fieldPayload = runFields.map((field) => ({
       id: String(field.id),
@@ -1669,6 +1786,8 @@ export default function Home() {
       documentId,
       items: fieldPayload,
       extractionApproach: runApproach,
+      runtimeSettings: runRuntimeSettings,
+      emptyResultsMaxRetries: runRuntimeSettings.emptyResultsMaxRetries,
     };
     const formData = new FormData();
     files.forEach((selectedFile) => {
@@ -1795,6 +1914,16 @@ export default function Home() {
           onClose={() => setIsCostMetricsOpen(false)}
         />
       )}
+      {isRuntimeSettingsOpen && (
+        <RuntimeSettingsModal
+          settings={runtimeSettings}
+          onChange={(settings) => {
+            setRuntimeSettings(settings);
+            setActiveTemplateId(null);
+          }}
+          onClose={() => setIsRuntimeSettingsOpen(false)}
+        />
+      )}
       <div className="flex min-h-screen">
         <TemplateDrawer
           templates={savedTemplates}
@@ -1897,12 +2026,22 @@ export default function Home() {
                 </label>
               ))}
             </fieldset>
-            <button
-              onClick={addField}
-              className="inline-flex items-center justify-center gap-2 rounded-xl bg-cyan-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-cyan-200"
-            >
-              <Plus className="h-4 w-4" /> Add Field
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setIsRuntimeSettingsOpen(true)}
+                className="inline-flex items-center justify-center rounded-xl border border-cyan-300/40 bg-slate-950/80 p-2.5 text-cyan-100 transition hover:border-cyan-200 hover:bg-cyan-300/10 hover:text-white"
+                aria-label="Open extraction settings"
+                title="Extraction settings"
+              >
+                <Settings2 className="h-4 w-4" />
+              </button>
+              <button
+                onClick={addField}
+                className="inline-flex items-center justify-center gap-2 rounded-xl bg-cyan-300 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-950 hover:bg-cyan-200"
+              >
+                <Plus className="h-4 w-4" /> Add Field
+              </button>
+            </div>
           </div>
           <ExtractionLoadingPanel
             logs={runtimeLogs}

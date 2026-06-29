@@ -40,6 +40,8 @@ FLAT_JSON_GUARD = (
     "The evidence and critique_response fields must be plain text only. Do not include nested JSON."
 )
 EMPTY_RESULT_MAX_RETRIES = 3
+MIN_EMPTY_RESULT_MAX_RETRIES = 0
+MAX_EMPTY_RESULT_MAX_RETRIES = 10
 
 
 
@@ -1016,6 +1018,28 @@ def _result_has_extracted_content(result: Any) -> bool:
     return True
 
 
+def empty_result_max_retries_from_template(template_payload: dict[str, Any]) -> int:
+    """Return the UI-configured empty-result retry limit with safe bounds."""
+
+    runtime_settings = template_payload.get("runtimeSettings")
+    raw_value = None
+    if isinstance(runtime_settings, dict):
+        raw_value = runtime_settings.get("emptyResultsMaxRetries")
+    if raw_value is None:
+        raw_value = template_payload.get("emptyResultsMaxRetries")
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        parsed = EMPTY_RESULT_MAX_RETRIES
+    return clamp_empty_result_max_retries(parsed)
+
+
+def clamp_empty_result_max_retries(value: int) -> int:
+    """Constrain empty-result retry limits to the supported runtime range."""
+
+    return min(MAX_EMPTY_RESULT_MAX_RETRIES, max(MIN_EMPTY_RESULT_MAX_RETRIES, value))
+
+
 def _missing_result_item_ids(template_payload: dict[str, Any], results: dict[str, Any]) -> list[str]:
     """Find template item IDs whose current result is absent or empty."""
 
@@ -1065,6 +1089,7 @@ def _pre_injected_prompt(
     *,
     field_complexity: str = "categorical_scalar",
     retry_attempt: int = 0,
+    max_retries: int = EMPTY_RESULT_MAX_RETRIES,
     prior_result: Any = None,
 ) -> str:
     item_type = str(item.get("type") or item.get("routeType") or "Scalar")
@@ -1094,7 +1119,7 @@ def _pre_injected_prompt(
     if retry_attempt:
         base_prompt += (
             f"Retry policy: this is empty-result verification retry {retry_attempt} of "
-            f"{EMPTY_RESULT_MAX_RETRIES}. The previous extraction returned no usable value: "
+            f"{max_retries}. The previous extraction returned no usable value: "
             f"{json.dumps(prior_result, default=str)[:1000]}. Re-check the evidence with a "
             "different interpretation of labels, abbreviations, and table context. Return a value "
             "as soon as the evidence supports one. Only return null/empty after explicitly verifying "
@@ -1155,6 +1180,7 @@ async def _extract_isolated_field(
     item_id: str,
     item_name: str,
     retry_attempt: int = 0,
+    max_retries: int = EMPTY_RESULT_MAX_RETRIES,
     prior_result: Any = None,
 ) -> dict[str, Any]:
     """Extract one template field in its own query, retrieval, and LLM context."""
@@ -1197,6 +1223,7 @@ async def _extract_isolated_field(
         chunks,
         field_complexity=field_complexity,
         retry_attempt=retry_attempt,
+        max_retries=max_retries,
         prior_result=prior_result,
     )
     generation_config = {"response_mime_type": "application/json"}
@@ -1248,6 +1275,7 @@ async def run_pre_injected_extraction(
     *,
     model: str = "gemini-3.5-flash",
     log_final_metrics: bool = True,
+    empty_results_max_retries: int | None = None,
 ) -> AsyncIterator[dict[str, Any] | str]:
     """Run stateless per-field RAG extraction without ADK Runner orchestration."""
 
@@ -1261,6 +1289,11 @@ async def run_pre_injected_extraction(
         page_texts = await _fetch_page_texts(document_id)
     except Exception:
         page_texts = {}
+    max_retries = (
+        empty_result_max_retries_from_template(template)
+        if empty_results_max_retries is None
+        else clamp_empty_result_max_retries(int(empty_results_max_retries))
+    )
 
     for index, item in enumerate(_template_items(template), start=1):
         item_id = _item_id(item, index)
@@ -1286,10 +1319,10 @@ async def run_pre_injected_extraction(
         node_audit_summary.extend(field_output["node_audit_summary"])
 
         retry_attempt = 1
-        while retry_attempt <= EMPTY_RESULT_MAX_RETRIES and not _result_has_extracted_content(extraction_results[item_id]):
+        while retry_attempt <= max_retries and not _result_has_extracted_content(extraction_results[item_id]):
             yield (
                 f"No usable result for {item_name}; running verification retry "
-                f"{retry_attempt}/{EMPTY_RESULT_MAX_RETRIES} with alternate retrieval."
+                f"{retry_attempt}/{max_retries} with alternate retrieval."
             )
             retry_output = await _extract_isolated_field(
                 client=client,
@@ -1298,6 +1331,7 @@ async def run_pre_injected_extraction(
                 item_id=item_id,
                 item_name=item_name,
                 retry_attempt=retry_attempt,
+                max_retries=max_retries,
                 prior_result=extraction_results[item_id],
             )
             extraction_results[item_id] = retry_output["result"]
@@ -1329,6 +1363,7 @@ async def retry_empty_extraction_results(
     existing_results: dict[str, Any],
     *,
     model: str = "gemini-3.5-flash",
+    empty_results_max_retries: int | None = None,
 ) -> AsyncIterator[dict[str, Any] | str]:
     """Retry missing/empty extraction results with the pre-injected verifier path.
 
@@ -1339,10 +1374,21 @@ async def retry_empty_extraction_results(
     missing_item_ids = set(_missing_result_item_ids(template, existing_results))
     if not missing_item_ids:
         return
+    max_retries = (
+        empty_result_max_retries_from_template(template)
+        if empty_results_max_retries is None
+        else clamp_empty_result_max_retries(int(empty_results_max_retries))
+    )
+    if max_retries <= 0:
+        yield (
+            f"Empty-result verifier found {len(missing_item_ids)} field(s) without usable output; "
+            "retrying is disabled by runtime settings."
+        )
+        return
 
     yield (
         f"Empty-result verifier found {len(missing_item_ids)} field(s) without usable output; "
-        f"retrying each up to {EMPTY_RESULT_MAX_RETRIES} time(s)."
+        f"retrying each up to {max_retries} time(s)."
     )
     client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
     events: list[dict[str, Any]] = []
@@ -1356,8 +1402,8 @@ async def retry_empty_extraction_results(
             continue
         item_name = str(item.get("name") or item.get("label") or item_id)
         prior_result = existing_results.get(item_id)
-        for retry_attempt in range(1, EMPTY_RESULT_MAX_RETRIES + 1):
-            yield f"Verifying empty result for {item_name}: retry {retry_attempt}/{EMPTY_RESULT_MAX_RETRIES}."
+        for retry_attempt in range(1, max_retries + 1):
+            yield f"Verifying empty result for {item_name}: retry {retry_attempt}/{max_retries}."
             field_output = await _extract_isolated_field(
                 client=client,
                 model=model,
@@ -1365,6 +1411,7 @@ async def retry_empty_extraction_results(
                 item_id=item_id,
                 item_name=item_name,
                 retry_attempt=retry_attempt,
+                max_retries=max_retries,
                 prior_result=prior_result,
             )
             retried_results[item_id] = field_output["result"]
