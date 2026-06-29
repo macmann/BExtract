@@ -123,7 +123,8 @@ async def _document_hybrid_search(
     dense_limit: int = 10,
     sparse_limit: int = 10,
     rank_constant: int = 60,
-) -> str:
+    structured: bool = False,
+) -> str | list[dict[str, object]]:
     query = query.strip()
     chunk_limit = max(1, min(int(chunk_limit or 3), int(max_chunk_limit or 10)))
     dense_limit = max(1, int(dense_limit or 10))
@@ -141,11 +142,31 @@ async def _document_hybrid_search(
     for dense_match in dense_matches:
         chunks_by_id[str(dense_match.get("id"))] = dense_match
 
-    fused_chunk_ids = _reciprocal_rank_fusion([dense_matches, sparse_matches], rank_constant=rank_constant)[:chunk_limit]
+    dense_scores = {str(row.get("id")): float(row.get("distance", 0.0) or 0.0) for row in dense_matches}
+    bm25_scores = {str(row.get("id")): float(row.get("bm25_score", 0.0) or 0.0) for row in sparse_matches}
+    rerank_order = _reciprocal_rank_fusion([dense_matches, sparse_matches], rank_constant=rank_constant)
+    fused_chunk_ids = rerank_order[:chunk_limit]
     if not fused_chunk_ids:
-        return "No relevant chunks found."
+        return [] if structured else "No relevant chunks found."
 
-    return "\n\n".join(str(chunks_by_id[chunk_id].get("chunk_text") or "") for chunk_id in fused_chunk_ids)
+    source_records: list[dict[str, object]] = []
+    for rank, chunk_id in enumerate(fused_chunk_ids, start=1):
+        chunk = chunks_by_id[chunk_id]
+        metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
+        source_records.append({
+            "chunk_id": chunk_id,
+            "page": metadata.get("page"),
+            "chunk": metadata.get("chunk"),
+            "chunk_text": str(chunk.get("chunk_text") or ""),
+            "dense_score": dense_scores.get(chunk_id),
+            "bm25_score": bm25_scores.get(chunk_id),
+            "rerank_score": 1.0 / (rank_constant + rank),
+        })
+
+    if structured:
+        return source_records
+
+    return "\n\n".join(str(record.get("chunk_text") or "") for record in source_records)
 
 
 async def document_hybrid_search(
@@ -158,7 +179,8 @@ async def document_hybrid_search(
     dense_limit: int = 10,
     sparse_limit: int = 10,
     rank_constant: int = 60,
-) -> str:
+    structured: bool = False,
+) -> str | list[dict[str, object]]:
     """Return top chunks using pgvector + BM25 reciprocal rank fusion.
 
     ``chunk_limit`` defaults to the narrow scalar-field window but callers can
@@ -173,6 +195,7 @@ async def document_hybrid_search(
         dense_limit=dense_limit,
         sparse_limit=sparse_limit,
         rank_constant=rank_constant,
+        structured=structured,
     )
 
 
