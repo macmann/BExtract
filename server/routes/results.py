@@ -6,9 +6,10 @@ import json
 from collections.abc import AsyncIterator
 from datetime import date, datetime
 from typing import Any, Literal
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from prisma import Prisma
 
 router = APIRouter(prefix="/api/results", tags=["results"])
@@ -54,6 +55,7 @@ def _normalize_file(row: dict[str, Any], *, include_payload: bool = False) -> di
         "status": row.get("status"),
         "logs": row.get("logs") or "",
         "error_message": row.get("error_message"),
+        "source_file_available": bool(row.get("source_file_path")),
     }
     if include_payload:
         item["extracted_payload"] = _coerce_payload(row.get("extracted_payload"))
@@ -105,7 +107,8 @@ async def _fetch_files(client: Prisma, run_id: str) -> list[dict[str, Any]]:
             "status"::text,
             "extracted_payload",
             "logs",
-            "error_message"
+            "error_message",
+            "source_file_path"
         FROM "file_extractions"
         WHERE "run_id" = $1::uuid
         ORDER BY "file_name" ASC, "id" ASC
@@ -210,6 +213,43 @@ async def _logs_stream(run_id: str) -> AsyncIterator[str]:
             yield str(file.get("logs") or "")
     finally:
         await client.disconnect()
+
+
+@router.get("/{run_id}/files/{file_id}/pdf")
+async def get_source_pdf(run_id: str, file_id: str) -> FileResponse:
+    """Serve the original PDF for a file extraction after validating run ownership."""
+
+    client = Prisma()
+    await client.connect()
+    try:
+        rows = await client.query_raw(
+            """
+            SELECT "source_file_path", "file_name"
+            FROM "file_extractions"
+            WHERE "id" = $1::uuid AND "run_id" = $2::uuid
+            LIMIT 1
+            """,
+            file_id,
+            run_id,
+        )
+    finally:
+        await client.disconnect()
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="File extraction not found for run")
+    row = dict(rows[0])
+    source_file_path = row.get("source_file_path")
+    if not source_file_path:
+        raise HTTPException(status_code=404, detail="Source PDF is unavailable for this file extraction")
+    pdf_path = Path(str(source_file_path)).resolve()
+    if not pdf_path.exists() or not pdf_path.is_file():
+        raise HTTPException(status_code=404, detail="Source PDF file is missing")
+    return FileResponse(
+        pdf_path,
+        media_type="application/pdf",
+        filename=str(row.get("file_name") or f"{file_id}.pdf"),
+        headers={"Content-Disposition": f'inline; filename="{row.get("file_name") or file_id + ".pdf"}"'},
+    )
 
 
 @router.delete("/{run_id}", status_code=status.HTTP_204_NO_CONTENT)

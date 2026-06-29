@@ -1,10 +1,18 @@
 export type RunStatus = "success" | "processing" | "failure";
 
+export type SourceWord = { text: string; x0?: number; y0?: number; x1?: number; y1?: number; index?: number };
+
+export type SourceBBox = { x0: number; y0: number; x1: number; y1: number };
+
 export type SourceChunk = {
   chunk_id: string;
   page?: string | number | null;
   chunk?: string | number | null;
   chunk_text: string;
+  bbox?: SourceBBox | null;
+  words?: SourceWord[];
+  page_width?: number | null;
+  page_height?: number | null;
   dense_score?: number | null;
   bm25_score?: number | null;
   rerank_score?: number | null;
@@ -35,6 +43,7 @@ export type RunDocument = {
   logs: string[];
   errorMessage?: string | null;
   extractedPayload?: ExtractedPayload | unknown;
+  sourceFileAvailable: boolean;
 };
 
 export type HistoricalRun = {
@@ -72,6 +81,7 @@ type ApiFile = {
   logs?: string | string[] | null;
   error_message?: string | null;
   extracted_payload?: unknown;
+  source_file_available?: boolean | null;
 };
 
 function normalizeStatus(status?: string | null): RunStatus {
@@ -145,6 +155,7 @@ export function mapApiRun(apiRun: ApiRun): HistoricalRun {
       logs: normalizeLogs(file.logs),
       errorMessage: file.error_message,
       extractedPayload: file.extracted_payload,
+      sourceFileAvailable: Boolean(file.source_file_available),
       ...fieldCounts,
     };
   });
