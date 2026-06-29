@@ -209,6 +209,16 @@ def test_month_year_date_fallback_ignores_bad_date_context_before_page_1_date():
     assert recovered["value"] == "May 2018"
 
 
+def test_empty_result_max_retries_from_template_uses_ui_setting_with_bounds():
+    from server.pipeline import empty_result_max_retries_from_template
+
+    assert empty_result_max_retries_from_template({"runtimeSettings": {"emptyResultsMaxRetries": 5}}) == 5
+    assert empty_result_max_retries_from_template({"emptyResultsMaxRetries": "2"}) == 2
+    assert empty_result_max_retries_from_template({"runtimeSettings": {"emptyResultsMaxRetries": 99}}) == 10
+    assert empty_result_max_retries_from_template({"runtimeSettings": {"emptyResultsMaxRetries": -1}}) == 0
+    assert empty_result_max_retries_from_template({}) == 3
+
+
 def test_recover_null_value_result_recovers_decision_drivers_full_text():
     from server.pipeline import recover_null_value_result
 
