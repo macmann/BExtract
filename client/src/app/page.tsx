@@ -17,6 +17,7 @@ import {
   FileJson,
   FolderOpen,
   Gauge,
+  Info,
   Layers3,
   MoreVertical,
   Play,
@@ -124,23 +125,23 @@ type ToastState = {
 
 const TEMPLATE_STORAGE_KEY = "bextract.savedTemplates";
 const runtimeSettingsSchema = [
-  { key: "emptyResultsMaxRetries", label: "Empty Results Max Retry", type: "number", defaultValue: 3, min: 0, max: 10, step: 1, description: "Controls how many times null or empty extracted fields are retried before returning the final payload." },
-  { key: "extractionModel", label: "Extraction Model", type: "text", defaultValue: "gemini-3.5-flash", description: "Model used by the pre-injected extractor and empty-result verifier." },
-  { key: "criticModel", label: "Critic Model", type: "text", defaultValue: "gemini-3.5-flash", description: "Reserved for critic/agentic validation model selection." },
-  { key: "scalarChunkLimit", label: "Scalar Chunk Limit", type: "number", defaultValue: 3, min: 1, max: 10, step: 1, description: "Evidence chunks supplied for scalar or categorical fields." },
-  { key: "narrativeChunkLimit", label: "Narrative Chunk Limit", type: "number", defaultValue: 8, min: 1, max: 10, step: 1, description: "Evidence chunks supplied for narrative or summary fields." },
-  { key: "maxChunkLimit", label: "Maximum Chunk Limit", type: "number", defaultValue: 10, min: 1, max: 25, step: 1, description: "Upper bound for final fused chunks returned to extraction prompts." },
-  { key: "retryChunkExpansionStep", label: "Retry Chunk Expansion", type: "number", defaultValue: 2, min: 0, max: 10, step: 1, description: "Additional chunks requested per empty-result retry attempt." },
-  { key: "denseCandidateLimit", label: "Dense Candidate Limit", type: "number", defaultValue: 10, min: 1, max: 50, step: 1, description: "Nearest-vector candidates considered before rank fusion." },
-  { key: "sparseCandidateLimit", label: "Sparse Candidate Limit", type: "number", defaultValue: 10, min: 1, max: 50, step: 1, description: "BM25 candidates considered before rank fusion." },
-  { key: "rankFusionConstant", label: "Rank Fusion Constant", type: "number", defaultValue: 60, min: 1, max: 200, step: 1, description: "Reciprocal-rank-fusion smoothing constant." },
-  { key: "queryMinWords", label: "Query Min Words", type: "number", defaultValue: 3, min: 1, max: 10, step: 1, description: "Minimum target words for generated retrieval queries." },
-  { key: "queryMaxWords", label: "Query Max Words", type: "number", defaultValue: 5, min: 1, max: 20, step: 1, description: "Maximum target words for generated retrieval queries." },
-  { key: "priorResultPreviewChars", label: "Prior Result Preview", type: "number", defaultValue: 1000, min: 0, max: 5000, step: 100, description: "Characters of previous empty output included in retry prompts." },
-  { key: "enforceFlatJson", label: "Enforce Flat JSON", type: "boolean", defaultValue: true, description: "Adds guardrails that keep evidence and critique fields as plain text." },
-  { key: "responseMimeType", label: "Response MIME Type", type: "text", defaultValue: "application/json", description: "Generation response MIME type for model calls." },
-  { key: "inputRatePerMillion", label: "Input $ / 1M Tokens", type: "number", defaultValue: 1.5, min: 0, max: 100, step: 0.01, description: "Input token rate used for estimated run costs." },
-  { key: "outputRatePerMillion", label: "Output $ / 1M Tokens", type: "number", defaultValue: 9, min: 0, max: 100, step: 0.01, description: "Output token rate used for estimated run costs." },
+  { key: "emptyResultsMaxRetries", label: "Empty Results Max Retry", type: "number", defaultValue: 3, min: 0, max: 10, step: 1, description: "Controls how many times null or empty extracted fields are retried before returning the final payload.", tooltip: "When extraction returns a blank, null, or unusable value, BExtract can re-run only the missing field instead of the whole batch. Higher values improve recovery for difficult PDFs but increase runtime and model cost. Set to 0 to keep the first answer and skip retry verification." },
+  { key: "extractionModel", label: "Extraction Model", type: "text", defaultValue: "gemini-3.5-flash", description: "Model used by the pre-injected extractor and empty-result verifier.", tooltip: "This model reads the retrieved evidence and produces the final JSON value for each field. More capable models can improve reasoning, table parsing, and long-answer quality, while smaller models usually run faster and cost less. Use a model name supported by your configured provider." },
+  { key: "criticModel", label: "Critic Model", type: "text", defaultValue: "gemini-3.5-flash", description: "Reserved for critic/agentic validation model selection.", tooltip: "This selects the model intended for validation or critic-style review when those workflow paths are enabled. It does not change the field extraction prompt directly, but it controls the model used to flag questionable outputs or agentic review decisions." },
+  { key: "scalarChunkLimit", label: "Scalar Chunk Limit", type: "number", defaultValue: 3, min: 1, max: 10, step: 1, description: "Evidence chunks supplied for scalar or categorical fields.", tooltip: "Scalar fields are short answers such as dates, amounts, names, IDs, or yes/no values. This setting controls how many top evidence chunks are sent to the model for those fields. Lower values reduce noise and cost; higher values help when the answer may appear in several nearby sections." },
+  { key: "narrativeChunkLimit", label: "Narrative Chunk Limit", type: "number", defaultValue: 8, min: 1, max: 10, step: 1, description: "Evidence chunks supplied for narrative or summary fields.", tooltip: "Narrative fields need broader context, such as summaries, clauses, fee schedules, or explanations. This controls how many chunks are sent for those fields. Larger windows can produce more complete summaries but may add unrelated text and increase token usage." },
+  { key: "maxChunkLimit", label: "Maximum Chunk Limit", type: "number", defaultValue: 10, min: 1, max: 25, step: 1, description: "Upper bound for final fused chunks returned to extraction prompts.", tooltip: "This is the safety ceiling after retrieval, rank fusion, and retry expansion. No field prompt receives more chunks than this value, even if scalar/narrative limits or retries request more. Raise it for complex documents; lower it to keep prompts focused and predictable." },
+  { key: "retryChunkExpansionStep", label: "Retry Chunk Expansion", type: "number", defaultValue: 2, min: 0, max: 10, step: 1, description: "Additional chunks requested per empty-result retry attempt.", tooltip: "Each time an empty field is retried, the workflow can widen the evidence window by this many chunks. This helps the retry look beyond the first retrieval set. A value of 0 retries with the same context; larger values may find missed evidence but cost more." },
+  { key: "denseCandidateLimit", label: "Dense Candidate Limit", type: "number", defaultValue: 10, min: 1, max: 50, step: 1, description: "Nearest-vector candidates considered before rank fusion.", tooltip: "Dense retrieval uses embeddings to find passages with similar meaning, even when wording differs. This setting controls how many semantic matches are collected before combining rankings. Increase it for varied legal or financial language; decrease it for faster, narrower retrieval." },
+  { key: "sparseCandidateLimit", label: "Sparse Candidate Limit", type: "number", defaultValue: 10, min: 1, max: 50, step: 1, description: "BM25 candidates considered before rank fusion.", tooltip: "Sparse retrieval uses keyword matching, which is useful for exact terms, field names, section titles, and defined terms. This setting controls how many keyword matches enter rank fusion. Higher values improve recall for exact wording but can bring in repetitive boilerplate." },
+  { key: "rankFusionConstant", label: "Rank Fusion Constant", type: "number", defaultValue: 60, min: 1, max: 200, step: 1, description: "Reciprocal-rank-fusion smoothing constant.", tooltip: "Rank fusion blends dense semantic results and sparse keyword results. Lower constants give more weight to the very top-ranked matches; higher constants smooth the scores so lower-ranked candidates can still contribute. Most users should keep the default unless tuning retrieval behavior." },
+  { key: "queryMinWords", label: "Query Min Words", type: "number", defaultValue: 3, min: 1, max: 10, step: 1, description: "Minimum target words for generated retrieval queries.", tooltip: "Before retrieval, BExtract asks the model to generate a concise search query for each field. This sets the minimum length of that query. Shorter queries are broader; longer minimums force more specific search terms." },
+  { key: "queryMaxWords", label: "Query Max Words", type: "number", defaultValue: 5, min: 1, max: 20, step: 1, description: "Maximum target words for generated retrieval queries.", tooltip: "This caps the generated query length. Lower values keep retrieval broad and simple; higher values let the query include more context from the field definition. If this is below Query Min Words, the app automatically raises it to match the minimum." },
+  { key: "priorResultPreviewChars", label: "Prior Result Preview", type: "number", defaultValue: 1000, min: 0, max: 5000, step: 100, description: "Characters of previous empty output included in retry prompts.", tooltip: "On retry, the prompt can include a preview of the prior failed result so the model knows what went wrong. More characters help debug verbose or malformed answers; fewer characters keep the retry prompt compact. Set to 0 to omit prior output from retry prompts." },
+  { key: "enforceFlatJson", label: "Enforce Flat JSON", type: "boolean", defaultValue: true, description: "Adds guardrails that keep evidence and critique fields as plain text.", tooltip: "When enabled, prompts explicitly require a flat JSON object and keep evidence or critique text from becoming nested JSON. This makes spreadsheet export and downstream parsing more reliable. Disable only if a custom workflow expects nested structures." },
+  { key: "responseMimeType", label: "Response MIME Type", type: "text", defaultValue: "application/json", description: "Generation response MIME type for model calls.", tooltip: "This value is passed to the model generation configuration. application/json tells compatible models to return structured JSON, which is what the extractor expects. Changing it can break parsing unless the backend and prompts are updated for another response format." },
+  { key: "inputRatePerMillion", label: "Input $ / 1M Tokens", type: "number", defaultValue: 1.5, min: 0, max: 100, step: 0.01, description: "Input token rate used for estimated run costs.", tooltip: "Used only for cost estimates in logs and run metrics. It multiplies prompt/input tokens by this dollar rate per one million tokens. Update it when your provider pricing changes; it does not affect extraction quality or provider billing directly." },
+  { key: "outputRatePerMillion", label: "Output $ / 1M Tokens", type: "number", defaultValue: 9, min: 0, max: 100, step: 0.01, description: "Output token rate used for estimated run costs.", tooltip: "Used only for cost estimates in logs and run metrics. It multiplies generated/output tokens by this dollar rate per one million tokens. Higher model prices should be reflected here so cost reports match expected invoices." },
 ] as const;
 
 
@@ -883,8 +884,18 @@ function RuntimeSettingsModal({
             <div className="grid gap-4 md:grid-cols-2">
               {activeFields.map((field) => (
                 <label key={field.key} className="block rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
-                  <span className="text-xs font-black uppercase tracking-[0.18em] text-slate-300">
-                    {field.label}
+                  <span className="flex items-start justify-between gap-3 text-xs font-black uppercase tracking-[0.18em] text-slate-300">
+                    <span>{field.label}</span>
+                    <span className="group relative inline-flex shrink-0" tabIndex={0}>
+                      <Info className="h-4 w-4 text-cyan-300" aria-hidden="true" />
+                      <span className="sr-only">Help for {field.label}</span>
+                      <span
+                        role="tooltip"
+                        className="pointer-events-none absolute right-0 top-6 z-10 hidden w-72 rounded-2xl border border-cyan-300/30 bg-slate-950 p-3 text-left text-[11px] font-semibold normal-case leading-relaxed tracking-normal text-slate-200 shadow-2xl shadow-cyan-950/50 group-hover:block group-focus:block"
+                      >
+                        {field.tooltip}
+                      </span>
+                    </span>
                   </span>
                   {field.type === "boolean" ? (
                     <span className="mt-3 flex items-center gap-3 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2">
