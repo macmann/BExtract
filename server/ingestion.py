@@ -7,6 +7,7 @@ import json
 import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import Any
 from io import BytesIO
 from pathlib import Path
 import re
@@ -22,7 +23,7 @@ class DocumentChunk:
     document_id: str
     chunk_type: str
     content: str
-    metadata: dict[str, str] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
@@ -47,45 +48,119 @@ def _source_bytes(document_file: bytes | str | Path) -> bytes:
 def extract_pdf_pages(pdf_bytes: bytes) -> list[str]:
     """Extract text from PDF bytes, returning one string per page."""
 
-    from PyPDF2 import PdfReader
+    return [page["text"] for page in extract_pdf_pages_with_layout(pdf_bytes)]
 
-    reader = PdfReader(BytesIO(pdf_bytes))
-    pages: list[str] = []
-    for page in reader.pages:
-        pages.append(page.extract_text() or "")
-    return pages
+
+def extract_pdf_pages_with_layout(pdf_bytes: bytes) -> list[dict[str, Any]]:
+    """Extract text and word-level coordinates from PDF bytes.
+
+    Coordinates are returned in PDF page points as ``x0``, ``y0``, ``x1``, and
+    ``y1`` with page dimensions so the frontend can scale highlights to the
+    rendered PDF page. Falls back to PyPDF2 text-only extraction when PyMuPDF is
+    unavailable or cannot parse the file.
+    """
+
+    try:
+        import fitz  # PyMuPDF
+
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        pages: list[dict[str, Any]] = []
+        for page_index, page in enumerate(doc, start=1):
+            words = []
+            text_parts = []
+            for word_index, word in enumerate(page.get_text("words")):
+                x0, y0, x1, y1, text, *_ = word
+                clean_text = str(text).strip()
+                if not clean_text:
+                    continue
+                words.append({
+                    "text": clean_text,
+                    "x0": float(x0),
+                    "y0": float(y0),
+                    "x1": float(x1),
+                    "y1": float(y1),
+                    "index": word_index,
+                })
+                text_parts.append(clean_text)
+            rect = page.rect
+            pages.append({
+                "page": page_index,
+                "text": " ".join(text_parts),
+                "words": words,
+                "width": float(rect.width),
+                "height": float(rect.height),
+            })
+        return pages
+    except Exception:
+        from PyPDF2 import PdfReader
+
+        reader = PdfReader(BytesIO(pdf_bytes))
+        return [
+            {"page": index, "text": page.extract_text() or "", "words": [], "width": None, "height": None}
+            for index, page in enumerate(reader.pages, start=1)
+        ]
+
+
+def _chunk_page_words(words: list[dict[str, Any]], max_tokens: int = 260, overlap: int = 40) -> list[dict[str, Any]]:
+    """Split page words into overlapping chunks while preserving coordinates."""
+
+    if not words:
+        return []
+    chunks: list[dict[str, Any]] = []
+    step = max(max_tokens - overlap, 1)
+    for start in range(0, len(words), step):
+        window = words[start : start + max_tokens]
+        if window:
+            chunks.append({"text": " ".join(str(word.get("text") or "") for word in window), "words": window})
+        if start + max_tokens >= len(words):
+            break
+    return chunks
 
 
 def _chunk_page_text(text: str, max_tokens: int = 260, overlap: int = 40) -> list[str]:
     """Split page text into lightweight overlapping chunks."""
 
-    tokens = text.split()
-    if not tokens:
-        return []
-    chunks: list[str] = []
-    step = max(max_tokens - overlap, 1)
-    for start in range(0, len(tokens), step):
-        window = tokens[start : start + max_tokens]
-        if window:
-            chunks.append(" ".join(window))
-        if start + max_tokens >= len(tokens):
-            break
-    return chunks
+    return [chunk["text"] for chunk in _chunk_page_words([{"text": token} for token in text.split()], max_tokens, overlap)]
+
+
+def _word_bbox(words: list[dict[str, Any]]) -> dict[str, float] | None:
+    positioned = [word for word in words if all(key in word for key in ("x0", "y0", "x1", "y1"))]
+    if not positioned:
+        return None
+    return {
+        "x0": min(float(word["x0"]) for word in positioned),
+        "y0": min(float(word["y0"]) for word in positioned),
+        "x1": max(float(word["x1"]) for word in positioned),
+        "y1": max(float(word["y1"]) for word in positioned),
+    }
 
 
 def parse_pdf_chunks(pdf_bytes: bytes, document_id: str) -> list[DocumentChunk]:
     """Extract PDF text page by page and convert it into retrieval chunks."""
 
     chunks: list[DocumentChunk] = []
-    for page_number, page_text in enumerate(extract_pdf_pages(pdf_bytes), start=1):
-        for chunk_number, content in enumerate(_chunk_page_text(page_text), start=1):
+    for page in extract_pdf_pages_with_layout(pdf_bytes):
+        page_number = int(page.get("page") or len(chunks) + 1)
+        page_chunks = _chunk_page_words(page.get("words") or []) or [
+            {"text": content, "words": []} for content in _chunk_page_text(str(page.get("text") or ""))
+        ]
+        for chunk_number, chunk in enumerate(page_chunks, start=1):
+            words = chunk.get("words") or []
+            metadata = {
+                "page": page_number,
+                "chunk": chunk_number,
+                "page_width": page.get("width"),
+                "page_height": page.get("height"),
+                "bbox": _word_bbox(words),
+                "words": words,
+            }
             chunks.append(
                 DocumentChunk(
                     chunk_id=f"{document_id}:p{page_number}:c{chunk_number}",
                     document_id=document_id,
                     chunk_type="pdf_text",
-                    content=content,
-                    metadata={"page": str(page_number), "chunk": str(chunk_number)},
+                    content=str(chunk.get("text") or ""),
+                    metadata=metadata,
                 )
             )
     return chunks

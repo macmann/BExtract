@@ -55,6 +55,8 @@ app.include_router(results_router)
 CLIENT_OUT_DIR = (Path(__file__).resolve().parent / ".." / "client" / "out").resolve()
 EXPORT_DIR = (Path(__file__).resolve().parent / "exports").resolve()
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+SOURCE_PDF_DIR = Path(os.getenv("BEXTRACT_SOURCE_PDF_DIR", Path(__file__).resolve().parent / "source_pdfs")).resolve()
+SOURCE_PDF_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class TemplateItemPayload(BaseModel):
@@ -192,6 +194,24 @@ async def _create_file_extraction(run_id: str, file_name: str) -> str:
     finally:
         await client.disconnect()
     return extraction_id
+
+
+def _source_pdf_path(run_id: str, extraction_id: str, file_name: str) -> Path:
+    suffix = Path(file_name).suffix or ".pdf"
+    safe_suffix = suffix if suffix.lower() == ".pdf" else ".pdf"
+    return SOURCE_PDF_DIR / run_id / f"{extraction_id}{safe_suffix}"
+
+
+async def _set_file_extraction_source_path(extraction_id: str, source_file_path: str) -> None:
+    client = await _new_prisma_client()
+    try:
+        await client.execute_raw(
+            'UPDATE "file_extractions" SET "source_file_path" = $2 WHERE "id" = $1::uuid',
+            extraction_id,
+            source_file_path,
+        )
+    finally:
+        await client.disconnect()
 
 
 async def _mark_file_extraction_success(run_id: str, extraction_id: str, outcome: _ExtractionStreamOutcome) -> None:
@@ -474,6 +494,8 @@ async def _extract_stream(
     progress_prefix: str = "",
     log_token_metrics: bool = True,
     batch_progress: dict[str, Any] | None = None,
+    document_id_override: str | None = None,
+    source_pdf_path: Path | None = None,
 ) -> AsyncIterator[str]:
     backend_log_lines: list[str] = []
     backend_log_capture = _TeeLogCapture(sys.__stdout__)
@@ -505,7 +527,12 @@ async def _extract_stream(
             )
             uploaded_bytes = await upload.read()
             file_name = upload.filename or "upload.pdf"
-            document_id = Path(file_name).stem or "uploaded_document"
+            document_id = document_id_override or Path(file_name).stem or "uploaded_document"
+            if source_pdf_path is not None:
+                source_pdf_path.parent.mkdir(parents=True, exist_ok=True)
+                source_pdf_path.write_bytes(uploaded_bytes)
+                if document_id_override:
+                    await _set_file_extraction_source_path(document_id_override, str(source_pdf_path))
 
             yield _sse("log", {"tone": "info", "status": prefixed_status(f"Document accepted: {file_name}"), "message": remember_log(f"Document accepted: {file_name}")})
             chunks = []
@@ -722,6 +749,7 @@ async def _extract_batch_stream(files: list[UploadFile], request: ExtractionRequ
     for index, upload in enumerate(files, start=1):
         file_name = upload.filename or f"upload_{index}.pdf"
         file_extraction_id = await _create_file_extraction(run_id, file_name)
+        source_pdf_path = _source_pdf_path(run_id, file_extraction_id, file_name)
         progress_prefix = f"[{index}/{total_files}] "
         outcome = _ExtractionStreamOutcome()
         yield _sse("log", {"tone": "info", "status": f"{progress_prefix}Processing file", "message": f"{progress_prefix}Processing {file_name}: Starting extraction.", "batch_id": batch_id, "run_id": run_id, "file_extraction_id": file_extraction_id, "file_name": file_name})
@@ -735,6 +763,8 @@ async def _extract_batch_stream(files: list[UploadFile], request: ExtractionRequ
                 progress_prefix=progress_prefix,
                 log_token_metrics=False,
                 batch_progress={"current": index, "total": total_files, "file_name": file_name, "run_id": run_id, "file_extraction_id": file_extraction_id},
+                document_id_override=file_extraction_id,
+                source_pdf_path=source_pdf_path,
             ):
                 _observe_extraction_stream_event(event, outcome)
                 yield event

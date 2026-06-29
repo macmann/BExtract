@@ -1,9 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ChevronDown, Download, FileText, TerminalSquare, X } from "lucide-react";
-import { fetchHistoricalRun, type HistoricalRun, type RunDocument, type RunStatus, type SourceChunk } from "@/lib/results-data";
+import { fetchHistoricalRun, type HistoricalRun, type RunDocument, type RunStatus, type SourceBBox, type SourceChunk, type SourceWord } from "@/lib/results-data";
 
 const statusStyles: Record<RunStatus, string> = {
   success: "border-emerald-400/30 bg-emerald-400/10 text-emerald-200",
@@ -42,6 +42,10 @@ function sourceChunksFrom(value: unknown): SourceChunk[] {
     dense_score: typeof source.dense_score === "number" ? source.dense_score : null,
     bm25_score: typeof source.bm25_score === "number" ? source.bm25_score : null,
     rerank_score: typeof source.rerank_score === "number" ? source.rerank_score : null,
+    bbox: isRecord(source.bbox) ? source.bbox as SourceBBox : null,
+    words: Array.isArray(source.words) ? source.words.filter(isRecord).map((word) => word as SourceWord) : [],
+    page_width: typeof source.page_width === "number" ? source.page_width : null,
+    page_height: typeof source.page_height === "number" ? source.page_height : null,
   })).filter((source) => source.chunk_id || source.chunk_text);
 }
 
@@ -69,6 +73,149 @@ function extractedFields(document: RunDocument): DisplayField[] {
   });
 }
 
+
+
+type PdfJsApi = {
+  GlobalWorkerOptions: { workerSrc: string };
+  getDocument: (url: string) => { promise: Promise<{ getPage: (page: number) => Promise<{ getViewport: (options: { scale: number }) => { width: number; height: number }; render: (options: { canvasContext: CanvasRenderingContext2D; viewport: { width: number; height: number } }) => { promise: Promise<void> } }> }> };
+};
+
+declare global {
+  interface Window { pdfjsLib?: PdfJsApi }
+}
+
+function loadPdfJs(): Promise<PdfJsApi> {
+  if (typeof window === "undefined") return Promise.reject(new Error("PDF preview is only available in the browser."));
+  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  return new Promise((resolve, reject) => {
+    const existing = document.querySelector<HTMLScriptElement>('script[data-pdfjs="true"]');
+    const script = existing ?? document.createElement("script");
+    script.dataset.pdfjs = "true";
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+    script.onload = () => {
+      if (!window.pdfjsLib) {
+        reject(new Error("PDF.js failed to initialize."));
+        return;
+      }
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+      resolve(window.pdfjsLib);
+    };
+    script.onerror = () => reject(new Error("PDF.js could not be loaded."));
+    if (!existing) document.head.appendChild(script);
+  });
+}
+
+type HighlightRect = { x0: number; y0: number; x1: number; y1: number };
+
+function normalizeText(value: string) {
+  return value.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function highlightRectsFor(source: SourceChunk, fieldValue: unknown): HighlightRect[] {
+  const words = source.words ?? [];
+  const value = displayValue(fieldValue);
+  const valueTokens = normalizeText(value).split(" ").filter(Boolean);
+  if (words.length > 0 && valueTokens.length > 0) {
+    const wordTokens = words.map((word) => normalizeText(word.text));
+    for (let index = 0; index <= wordTokens.length - valueTokens.length; index += 1) {
+      if (valueTokens.every((token, offset) => wordTokens[index + offset] === token)) {
+        return words.slice(index, index + valueTokens.length).flatMap((word) => (
+          typeof word.x0 === "number" && typeof word.y0 === "number" && typeof word.x1 === "number" && typeof word.y1 === "number"
+            ? [{ x0: word.x0, y0: word.y0, x1: word.x1, y1: word.y1 }]
+            : []
+        ));
+      }
+    }
+  }
+  return source.bbox ? [source.bbox] : [];
+}
+
+function SourcePreviewModal({ runId, document, fieldName, fieldValue, sources, onClose }: { runId: string; document: RunDocument; fieldName: string; fieldValue: unknown; sources: SourceChunk[]; onClose: () => void }) {
+  const primarySource = sources[0];
+  const pageNumber = Number(primarySource?.page || 0);
+  const pdfUrl = `/api/results/${encodeURIComponent(runId)}/files/${encodeURIComponent(document.id)}/pdf`;
+  const rects = primarySource ? highlightRectsFor(primarySource, fieldValue) : [];
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6">
+      <div className="max-h-[90vh] w-full max-w-6xl overflow-hidden rounded-3xl border border-slate-700 bg-slate-950 shadow-2xl">
+        <div className="flex items-start justify-between gap-4 border-b border-slate-800 p-5">
+          <div>
+            <p className="text-xs uppercase tracking-[0.2em] text-cyan-300">Source preview</p>
+            <h2 className="mt-2 text-xl font-bold text-white">{fieldName}</h2>
+            <p className="mt-1 text-sm text-slate-500">{document.fileName}</p>
+          </div>
+          <button onClick={onClose} className="rounded-full border border-slate-700 p-2 text-slate-300 hover:border-cyan-300/70 hover:text-white">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="grid max-h-[75vh] gap-4 overflow-y-auto p-5 lg:grid-cols-[minmax(0,1fr)_22rem]">
+          {document.sourceFileAvailable && pageNumber > 0 ? (
+            <PdfCanvas pdfUrl={pdfUrl} pageNumber={pageNumber} source={primarySource} rects={rects} />
+          ) : (
+            <div className="rounded-2xl border border-yellow-300/20 bg-yellow-300/10 p-5 text-sm text-yellow-100">
+              {document.sourceFileAvailable ? "No page number is available for PDF navigation." : "The original PDF is unavailable for this run."}
+            </div>
+          )}
+          <div className="space-y-4">
+            {sources.map((source, index) => (
+              <div key={`${source.chunk_id}-${index}`} className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
+                <div className="flex flex-wrap gap-3 text-xs font-semibold text-slate-400">
+                  <span>Page {source.page ?? "unknown"}</span>
+                  <span>Chunk {source.chunk ?? "unknown"}</span>
+                  <span className="font-mono">{source.chunk_id}</span>
+                </div>
+                <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-slate-200">{source.chunk_text}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PdfCanvas({ pdfUrl, pageNumber, source, rects }: { pdfUrl: string; pageNumber: number; source: SourceChunk; rects: HighlightRect[] }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    async function renderPdf() {
+      try {
+        const pdfjs = await loadPdfJs();
+        const pdf = await pdfjs.getDocument(pdfUrl).promise;
+        const page = await pdf.getPage(pageNumber);
+        const viewport = page.getViewport({ scale: 1.35 });
+        const canvas = canvasRef.current;
+        if (!canvas || cancelled) return;
+        const context = canvas.getContext("2d");
+        if (!context) return;
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        await page.render({ canvasContext: context, viewport }).promise;
+        context.fillStyle = "rgba(34, 211, 238, 0.30)";
+        context.strokeStyle = "rgba(34, 211, 238, 0.95)";
+        context.lineWidth = 1.5;
+        const width = source.page_width || viewport.width / 1.35;
+        const height = source.page_height || viewport.height / 1.35;
+        rects.forEach((rect) => {
+          const x = (rect.x0 / width) * viewport.width;
+          const y = (rect.y0 / height) * viewport.height;
+          const w = ((rect.x1 - rect.x0) / width) * viewport.width;
+          const h = ((rect.y1 - rect.y0) / height) * viewport.height;
+          context.fillRect(x, y, w, h);
+          context.strokeRect(x, y, w, h);
+        });
+      } catch (renderError) {
+        if (!cancelled) setError(renderError instanceof Error ? renderError.message : "Unable to render PDF preview.");
+      }
+    }
+    void renderPdf();
+    return () => { cancelled = true; };
+  }, [pdfUrl, pageNumber, rects, source.page_height, source.page_width]);
+  if (error) return <div className="rounded-2xl border border-yellow-300/20 bg-yellow-300/10 p-5 text-sm text-yellow-100">PDF preview unavailable: {error}</div>;
+  return <div className="overflow-auto rounded-2xl border border-slate-800 bg-slate-900 p-3"><canvas ref={canvasRef} className="mx-auto max-w-full" /></div>;
+}
+
 function downloadRunArtifact(runId: string, format: "csv" | "json" | "logs") {
   window.location.href = `/api/results/${encodeURIComponent(runId)}/download?format=${format}`;
 }
@@ -78,7 +225,7 @@ export default function RunInspectorClient({ runId }: { runId: string }) {
   const [openLogId, setOpenLogId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [selectedSources, setSelectedSources] = useState<{ documentName: string; fieldName: string; sources: SourceChunk[] } | null>(null);
+  const [selectedSources, setSelectedSources] = useState<{ document: RunDocument; fieldName: string; fieldValue: unknown; sources: SourceChunk[] } | null>(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -204,7 +351,7 @@ export default function RunInspectorClient({ runId }: { runId: string }) {
                       </div>
                       <button
                         disabled={field.sources.length === 0}
-                        onClick={() => setSelectedSources({ documentName: document.fileName, fieldName: field.name, sources: field.sources })}
+                        onClick={() => setSelectedSources({ document, fieldName: field.name, fieldValue: field.value, sources: field.sources })}
                         className="self-start rounded-lg border border-cyan-300/30 bg-cyan-300/10 px-3 py-1.5 text-xs font-bold text-cyan-100 hover:bg-cyan-300/15 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-900 disabled:text-slate-600"
                       >
                         View source
@@ -225,32 +372,14 @@ export default function RunInspectorClient({ runId }: { runId: string }) {
         </div>
       </section>
       {selectedSources && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6">
-          <div className="max-h-[85vh] w-full max-w-3xl overflow-hidden rounded-3xl border border-slate-700 bg-slate-950 shadow-2xl">
-            <div className="flex items-start justify-between gap-4 border-b border-slate-800 p-5">
-              <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-cyan-300">Source chunks</p>
-                <h2 className="mt-2 text-xl font-bold text-white">{selectedSources.fieldName}</h2>
-                <p className="mt-1 text-sm text-slate-500">{selectedSources.documentName}</p>
-              </div>
-              <button onClick={() => setSelectedSources(null)} className="rounded-full border border-slate-700 p-2 text-slate-300 hover:border-cyan-300/70 hover:text-white">
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-            <div className="max-h-[65vh] space-y-4 overflow-y-auto p-5">
-              {selectedSources.sources.map((source, index) => (
-                <div key={`${source.chunk_id}-${index}`} className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
-                  <div className="flex flex-wrap gap-3 text-xs font-semibold text-slate-400">
-                    <span>Page {source.page ?? "unknown"}</span>
-                    <span>Chunk {source.chunk ?? "unknown"}</span>
-                    <span className="font-mono">{source.chunk_id}</span>
-                  </div>
-                  <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-slate-200">{source.chunk_text}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
+        <SourcePreviewModal
+          runId={run.id}
+          document={selectedSources.document}
+          fieldName={selectedSources.fieldName}
+          fieldValue={selectedSources.fieldValue}
+          sources={selectedSources.sources}
+          onClose={() => setSelectedSources(null)}
+        />
       )}
     </main>
   );

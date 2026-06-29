@@ -81,6 +81,7 @@ model FileExtraction {
   extractedPayload Json                    @default("{}") @map("extracted_payload")
   logs             String                  @default("") @db.Text
   errorMessage     String?                 @map("error_message") @db.Text
+  sourceFilePath   String?                 @map("source_file_path") @db.Text
   run              PipelineRun             @relation(fields: [runId], references: [id], onDelete: Cascade)
 
   @@index([runId])
