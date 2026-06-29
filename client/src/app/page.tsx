@@ -144,6 +144,44 @@ const runtimeSettingsSchema = [
 ] as const;
 
 
+
+const runtimeSettingsCategories = [
+  {
+    id: "models",
+    label: "Models",
+    description: "Model selection and response format",
+    fields: ["extractionModel", "criticModel", "responseMimeType", "enforceFlatJson"],
+  },
+  {
+    id: "retrieval",
+    label: "Retrieval",
+    description: "Chunking, candidate limits, and rank fusion",
+    fields: [
+      "scalarChunkLimit",
+      "narrativeChunkLimit",
+      "maxChunkLimit",
+      "retryChunkExpansionStep",
+      "denseCandidateLimit",
+      "sparseCandidateLimit",
+      "rankFusionConstant",
+    ],
+  },
+  {
+    id: "queries",
+    label: "Queries",
+    description: "Generated query length and retry context",
+    fields: ["queryMinWords", "queryMaxWords", "priorResultPreviewChars", "emptyResultsMaxRetries"],
+  },
+  {
+    id: "costs",
+    label: "Costs",
+    description: "Token cost estimation rates",
+    fields: ["inputRatePerMillion", "outputRatePerMillion"],
+  },
+] as const;
+
+type RuntimeSettingsCategory = (typeof runtimeSettingsCategories)[number];
+
 type RuntimeSettingsField = (typeof runtimeSettingsSchema)[number];
 
 const defaultRuntimeSettings = runtimeSettingsSchema.reduce((settings, field) => ({
@@ -757,6 +795,11 @@ function RuntimeSettingsModal({
   onChange: (settings: RuntimeSettings) => void;
   onClose: () => void;
 }) {
+  const [activeCategoryId, setActiveCategoryId] = useState<RuntimeSettingsCategory["id"]>(runtimeSettingsCategories[0].id);
+  const activeCategory = runtimeSettingsCategories.find((category) => category.id === activeCategoryId) ?? runtimeSettingsCategories[0];
+  const activeCategoryFieldKeys = new Set<RuntimeSettingsField["key"]>(activeCategory.fields);
+  const activeFields = runtimeSettingsSchema.filter((field) => activeCategoryFieldKeys.has(field.key));
+
   const updateSetting = (field: RuntimeSettingsField, value: string | boolean) => {
     onChange(normalizeRuntimeSettings({
       ...settings,
@@ -771,8 +814,8 @@ function RuntimeSettingsModal({
       aria-modal="true"
       aria-labelledby="runtime-settings-title"
     >
-      <div className="w-full max-w-md overflow-hidden rounded-3xl border border-cyan-300/30 bg-slate-950 shadow-2xl shadow-cyan-950/40">
-        <div className="flex items-start justify-between border-b border-slate-800 bg-cyan-300/10 p-5">
+      <div className="flex max-h-[calc(100vh-2rem)] w-full max-w-3xl flex-col overflow-hidden rounded-3xl border border-cyan-300/30 bg-slate-950 shadow-2xl shadow-cyan-950/40">
+        <div className="flex shrink-0 items-start justify-between border-b border-slate-800 bg-cyan-300/10 p-5">
           <div>
             <p className="text-xs font-black uppercase tracking-[0.24em] text-cyan-200">
               Runtime Settings
@@ -792,33 +835,85 @@ function RuntimeSettingsModal({
             <X className="h-5 w-5" />
           </button>
         </div>
-        <div className="space-y-4 p-5">
-          {runtimeSettingsSchema.map((field) => (
-            <label key={field.key} className="block rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
-              <span className="text-xs font-black uppercase tracking-[0.18em] text-slate-300">
-                {field.label}
-              </span>
-              {field.type === "boolean" ? (
-                <input
-                  type="checkbox"
-                  checked={Boolean(settings[field.key])}
-                  onChange={(event) => updateSetting(field, event.target.checked)}
-                  className="mt-3 h-4 w-4 accent-cyan-300"
-                />
-              ) : (
-                <input
-                  type={field.type}
-                  min={field.type === "number" ? field.min : undefined}
-                  max={field.type === "number" ? field.max : undefined}
-                  step={field.type === "number" ? field.step : undefined}
-                  value={String(settings[field.key])}
-                  onChange={(event) => updateSetting(field, event.target.value)}
-                  className="mt-3 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm font-bold text-cyan-100 outline-none transition focus:border-cyan-300"
-                />
-              )}
-              <p className="mt-2 text-xs text-slate-500">{field.description}</p>
-            </label>
-          ))}
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div
+            className="flex shrink-0 gap-2 overflow-x-auto border-b border-slate-800 p-3"
+            role="tablist"
+            aria-label="Runtime settings categories"
+          >
+            {runtimeSettingsCategories.map((category) => {
+              const isActive = category.id === activeCategory.id;
+              return (
+                <button
+                  key={category.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={isActive}
+                  aria-controls={`runtime-settings-panel-${category.id}`}
+                  id={`runtime-settings-tab-${category.id}`}
+                  onClick={() => setActiveCategoryId(category.id)}
+                  className={`shrink-0 rounded-2xl border px-4 py-2 text-left transition ${
+                    isActive
+                      ? "border-cyan-300/70 bg-cyan-300/15 text-cyan-100"
+                      : "border-slate-800 bg-slate-900/70 text-slate-400 hover:border-slate-700 hover:text-slate-100"
+                  }`}
+                >
+                  <span className="block text-xs font-black uppercase tracking-[0.18em]">
+                    {category.label}
+                  </span>
+                  <span className="mt-1 block text-[11px] font-semibold normal-case tracking-normal opacity-75">
+                    {category.fields.length} settings
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          <div
+            id={`runtime-settings-panel-${activeCategory.id}`}
+            role="tabpanel"
+            aria-labelledby={`runtime-settings-tab-${activeCategory.id}`}
+            className="min-h-0 flex-1 overflow-y-auto p-5"
+          >
+            <div className="mb-4 rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+              <h3 className="text-sm font-black uppercase tracking-[0.18em] text-cyan-100">
+                {activeCategory.label}
+              </h3>
+              <p className="mt-1 text-sm text-slate-400">{activeCategory.description}</p>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              {activeFields.map((field) => (
+                <label key={field.key} className="block rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
+                  <span className="text-xs font-black uppercase tracking-[0.18em] text-slate-300">
+                    {field.label}
+                  </span>
+                  {field.type === "boolean" ? (
+                    <span className="mt-3 flex items-center gap-3 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(settings[field.key])}
+                        onChange={(event) => updateSetting(field, event.target.checked)}
+                        className="h-4 w-4 accent-cyan-300"
+                      />
+                      <span className="text-sm font-bold text-cyan-100">
+                        {settings[field.key] ? "Enabled" : "Disabled"}
+                      </span>
+                    </span>
+                  ) : (
+                    <input
+                      type={field.type}
+                      min={field.type === "number" ? field.min : undefined}
+                      max={field.type === "number" ? field.max : undefined}
+                      step={field.type === "number" ? field.step : undefined}
+                      value={String(settings[field.key])}
+                      onChange={(event) => updateSetting(field, event.target.value)}
+                      className="mt-3 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm font-bold text-cyan-100 outline-none transition focus:border-cyan-300"
+                    />
+                  )}
+                  <p className="mt-2 text-xs text-slate-500">{field.description}</p>
+                </label>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     </div>
