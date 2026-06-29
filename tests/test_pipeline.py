@@ -513,6 +513,45 @@ def test_pre_injected_prompt_omits_example_format_section_when_absent():
     assert "[EXPECTED FORMAT EXAMPLE]" not in prompt
 
 
+
+def test_runtime_settings_from_template_normalizes_modular_values():
+    from server.settings import runtime_settings_from_template
+
+    settings = runtime_settings_from_template({
+        "runtimeSettings": {
+            "emptyResultsMaxRetries": 4,
+            "extractionModel": "custom-extractor",
+            "scalarChunkLimit": 4,
+            "narrativeChunkLimit": 2,
+            "maxChunkLimit": 3,
+            "denseCandidateLimit": 12,
+            "sparseCandidateLimit": 9,
+            "rankFusionConstant": 75,
+            "queryMinWords": 6,
+            "queryMaxWords": 2,
+            "priorResultPreviewChars": 250,
+            "enforceFlatJson": "false",
+            "responseMimeType": "application/json",
+            "inputRatePerMillion": 2.5,
+            "outputRatePerMillion": 11,
+        }
+    })
+
+    assert settings.empty_results_max_retries == 4
+    assert settings.extraction_model == "custom-extractor"
+    assert settings.scalar_chunk_limit == 4
+    assert settings.narrative_chunk_limit == 4
+    assert settings.max_chunk_limit == 4
+    assert settings.dense_candidate_limit == 12
+    assert settings.sparse_candidate_limit == 9
+    assert settings.rank_fusion_constant == 75
+    assert settings.query_min_words == 6
+    assert settings.query_max_words == 6
+    assert settings.prior_result_preview_chars == 250
+    assert settings.enforce_flat_json is False
+    assert settings.input_rate_per_million == 2.5
+    assert settings.output_rate_per_million == 11
+
 def test_run_pre_injected_extraction_transforms_query_without_example_format(monkeypatch):
     import server.pipeline as pipeline
 
@@ -589,7 +628,16 @@ def test_run_pre_injected_extraction_transforms_query_without_example_format(mon
 
     events = asyncio.run(collect_events())
 
-    assert search_calls == [{"query": "final decision keywords", "chunk_limit": 3}]
+    assert search_calls == [
+        {
+            "query": "final decision keywords",
+            "chunk_limit": 3,
+            "max_chunk_limit": 10,
+            "dense_limit": 10,
+            "sparse_limit": 10,
+            "rank_constant": 60,
+        }
+    ]
     query_prompt = DummyGenAI.last_client.aio.models.prompts[0]["contents"]
     assert "Rating Action" in query_prompt
     assert "Extract and format the final decision." in query_prompt
@@ -697,8 +745,22 @@ def test_run_pre_injected_extraction_isolates_each_field_context(monkeypatch):
     events = asyncio.run(collect_events())
 
     assert search_calls == [
-        {"query": "decision driver keywords", "chunk_limit": 8},
-        {"query": "capital ratio keywords", "chunk_limit": 3},
+        {
+            "query": "decision driver keywords",
+            "chunk_limit": 8,
+            "max_chunk_limit": 10,
+            "dense_limit": 10,
+            "sparse_limit": 10,
+            "rank_constant": 60,
+        },
+        {
+            "query": "capital ratio keywords",
+            "chunk_limit": 3,
+            "max_chunk_limit": 10,
+            "dense_limit": 10,
+            "sparse_limit": 10,
+            "rank_constant": 60,
+        },
     ]
     prompts = [call["contents"] for call in DummyGenAI.last_client.aio.models.prompts]
     assert "Decision drivers" in prompts[0]
