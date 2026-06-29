@@ -133,7 +133,8 @@ scalar_extractor = LlmAgent(
         "You extract isolated scalar data points from insurance and financial "
         "documents. Use search_tool with the requested field name and definition "
         "before answering. Return strict JSON only with keys: item_id, field_name, "
-        "value, unit, confidence, evidence, and critique_response. If workflow "
+        "value, unit, confidence, evidence, critique_response, and source_chunks. "
+        "Populate source_chunks with supporting retrieved chunk_id values when available. If workflow "
         "state includes a critique for this item, correct the extraction and "
         "explain the fix in critique_response. "
         f"{FLAT_JSON_GUARD}"
@@ -153,7 +154,8 @@ tabular_extractor = LlmAgent(
         "structured JSON arrays. Use search_tool with the table name and "
         "definition before answering. Preserve row order, column names, numeric "
         "types, and source evidence. Return strict JSON only with keys: item_id, "
-        "table_name, rows, confidence, evidence, and critique_response. If workflow "
+        "table_name, rows, confidence, evidence, critique_response, and source_chunks. "
+        "Populate source_chunks with supporting retrieved chunk_id values when available. If workflow "
         "state includes a critique for this table, revise only the affected rows. "
         f"{FLAT_JSON_GUARD}"
     ),
@@ -700,6 +702,7 @@ def normalize_workflow_results(template_payload: dict[str, Any], workflow_output
                 "confidence": _case_insensitive_get(result, "confidence", "score", default=0.0),
                 "evidence": _case_insensitive_get(result, "evidence", "source", "citation", default=""),
                 "critique_response": _case_insensitive_get(result, "critique_response", "critique response", default=""),
+                "source_chunks": _case_insensitive_get(result, "source_chunks", "source chunks", "sources", default=[]),
             })
         elif result is not None:
             mapped[item_id] = result
@@ -1080,7 +1083,7 @@ def _pre_injected_prompt(
     item: dict[str, Any],
     item_id: str,
     item_name: str,
-    chunks: str,
+    chunks: Any,
     *,
     field_complexity: str = "categorical_scalar",
     retry_attempt: int = 0,
@@ -1095,7 +1098,8 @@ def _pre_injected_prompt(
     base_prompt = (
         "You are extracting one field from a document using only the retrieved evidence below.\n"
         "Return strict JSON only. Do not wrap the JSON in markdown.\n"
-        "Required keys: item_id, field_name, value, unit, confidence, evidence, critique_response.\n"
+        "Required keys: item_id, field_name, value, unit, confidence, evidence, critique_response, source_chunks.\n"
+        "source_chunks must be an array of the chunk_id strings that support the value. Use only chunk_id values shown in the retrieved source records.\n"
         f"{FLAT_JSON_GUARD if runtime_settings.enforce_flat_json else ''}\n"
         "For tabular fields, put the parsed row array in value.\n\n"
         f"Item ID: {item_id}\n"
@@ -1131,9 +1135,14 @@ def _pre_injected_prompt(
             f"{example_format}\n"
         )
 
+    if isinstance(chunks, list):
+        chunk_context = json.dumps(chunks, ensure_ascii=False, default=str, indent=2)
+    else:
+        chunk_context = str(chunks)
+
     return base_prompt + (
-        "\nRetrieved document chunks:\n"
-        f"{chunks}\n"
+        "\nRetrieved source records:\n"
+        f"{chunk_context}\n"
     )
 
 
@@ -1218,19 +1227,20 @@ async def _extract_isolated_field(
             runtime_settings.narrative_chunk_limit,
         )
     chunk_limit = min(chunk_limit, runtime_settings.max_chunk_limit)
-    chunks = await document_hybrid_search(
+    source_records = await document_hybrid_search(
         query=generated_clean_query,
         chunk_limit=chunk_limit,
         max_chunk_limit=runtime_settings.max_chunk_limit,
         dense_limit=runtime_settings.dense_candidate_limit,
         sparse_limit=runtime_settings.sparse_candidate_limit,
         rank_constant=runtime_settings.rank_fusion_constant,
+        structured=True,
     )
     prompt = _pre_injected_prompt(
         item,
         item_id,
         item_name,
-        chunks,
+        source_records,
         field_complexity=field_complexity,
         retry_attempt=retry_attempt,
         max_retries=max_retries,
@@ -1258,6 +1268,13 @@ async def _extract_isolated_field(
 
     raw_text = getattr(response, "text", "") or ""
     parsed = _parse_pre_injected_response(raw_text)
+    parsed_source_chunks = parsed.get("source_chunks", parsed.get("sources", []))
+    source_records_by_id = {str(record.get("chunk_id")): record for record in source_records} if isinstance(source_records, list) else {}
+    if isinstance(parsed_source_chunks, list) and parsed_source_chunks:
+        source_chunks = [source_records_by_id.get(str(source), source) for source in parsed_source_chunks]
+    else:
+        source_chunks = source_records if isinstance(source_records, list) else []
+
     result = recover_null_value_result({
         "item_id": item_id,
         "field_name": item_name,
@@ -1266,6 +1283,7 @@ async def _extract_isolated_field(
         "confidence": parsed.get("confidence", 0.0),
         "evidence": parsed.get("evidence", ""),
         "critique_response": parsed.get("critique_response", ""),
+        "source_chunks": source_chunks,
     })
 
     return {

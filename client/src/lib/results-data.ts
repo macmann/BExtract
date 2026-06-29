@@ -1,5 +1,30 @@
 export type RunStatus = "success" | "processing" | "failure";
 
+export type SourceChunk = {
+  chunk_id: string;
+  page?: string | number | null;
+  chunk?: string | number | null;
+  chunk_text: string;
+  dense_score?: number | null;
+  bm25_score?: number | null;
+  rerank_score?: number | null;
+};
+
+export type ExtractedFieldResult = {
+  item_id?: string;
+  field_name?: string;
+  value?: unknown;
+  unit?: string | null;
+  confidence?: number | string | null;
+  evidence?: string | null;
+  critique_response?: string | null;
+  source_chunks?: SourceChunk[];
+  sources?: SourceChunk[];
+  [key: string]: unknown;
+};
+
+export type ExtractedPayload = Record<string, ExtractedFieldResult | unknown>;
+
 export type RunDocument = {
   id: string;
   fileName: string;
@@ -9,7 +34,7 @@ export type RunDocument = {
   totalFields: number;
   logs: string[];
   errorMessage?: string | null;
-  extractedPayload?: unknown;
+  extractedPayload?: ExtractedPayload | unknown;
 };
 
 export type HistoricalRun = {
@@ -91,7 +116,7 @@ function countPayloadFields(payload: unknown): { extractedFields: number; totalF
         emptyFields.push(path);
         return;
       }
-      entries.forEach(([key, child]) => visit(child, path ? `${path}.${key}` : key));
+      entries.filter(([key]) => key !== "source_chunks" && key !== "sources").forEach(([key, child]) => visit(child, path ? `${path}.${key}` : key));
       return;
     }
 
