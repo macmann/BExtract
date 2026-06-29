@@ -38,6 +38,22 @@ type ExtractionApproach = "pre_injected" | "agentic";
 
 type RuntimeSettings = {
   emptyResultsMaxRetries: number;
+  extractionModel: string;
+  criticModel: string;
+  scalarChunkLimit: number;
+  narrativeChunkLimit: number;
+  maxChunkLimit: number;
+  retryChunkExpansionStep: number;
+  denseCandidateLimit: number;
+  sparseCandidateLimit: number;
+  rankFusionConstant: number;
+  queryMinWords: number;
+  queryMaxWords: number;
+  priorResultPreviewChars: number;
+  enforceFlatJson: boolean;
+  responseMimeType: string;
+  inputRatePerMillion: number;
+  outputRatePerMillion: number;
 };
 
 type FieldCard = {
@@ -107,17 +123,58 @@ type ToastState = {
 };
 
 const TEMPLATE_STORAGE_KEY = "bextract.savedTemplates";
-const DEFAULT_EMPTY_RESULTS_MAX_RETRIES = 3;
-const MIN_EMPTY_RESULTS_MAX_RETRIES = 0;
-const MAX_EMPTY_RESULTS_MAX_RETRIES = 10;
+const runtimeSettingsSchema = [
+  { key: "emptyResultsMaxRetries", label: "Empty Results Max Retry", type: "number", defaultValue: 3, min: 0, max: 10, step: 1, description: "Controls how many times null or empty extracted fields are retried before returning the final payload." },
+  { key: "extractionModel", label: "Extraction Model", type: "text", defaultValue: "gemini-3.5-flash", description: "Model used by the pre-injected extractor and empty-result verifier." },
+  { key: "criticModel", label: "Critic Model", type: "text", defaultValue: "gemini-3.5-flash", description: "Reserved for critic/agentic validation model selection." },
+  { key: "scalarChunkLimit", label: "Scalar Chunk Limit", type: "number", defaultValue: 3, min: 1, max: 10, step: 1, description: "Evidence chunks supplied for scalar or categorical fields." },
+  { key: "narrativeChunkLimit", label: "Narrative Chunk Limit", type: "number", defaultValue: 8, min: 1, max: 10, step: 1, description: "Evidence chunks supplied for narrative or summary fields." },
+  { key: "maxChunkLimit", label: "Maximum Chunk Limit", type: "number", defaultValue: 10, min: 1, max: 25, step: 1, description: "Upper bound for final fused chunks returned to extraction prompts." },
+  { key: "retryChunkExpansionStep", label: "Retry Chunk Expansion", type: "number", defaultValue: 2, min: 0, max: 10, step: 1, description: "Additional chunks requested per empty-result retry attempt." },
+  { key: "denseCandidateLimit", label: "Dense Candidate Limit", type: "number", defaultValue: 10, min: 1, max: 50, step: 1, description: "Nearest-vector candidates considered before rank fusion." },
+  { key: "sparseCandidateLimit", label: "Sparse Candidate Limit", type: "number", defaultValue: 10, min: 1, max: 50, step: 1, description: "BM25 candidates considered before rank fusion." },
+  { key: "rankFusionConstant", label: "Rank Fusion Constant", type: "number", defaultValue: 60, min: 1, max: 200, step: 1, description: "Reciprocal-rank-fusion smoothing constant." },
+  { key: "queryMinWords", label: "Query Min Words", type: "number", defaultValue: 3, min: 1, max: 10, step: 1, description: "Minimum target words for generated retrieval queries." },
+  { key: "queryMaxWords", label: "Query Max Words", type: "number", defaultValue: 5, min: 1, max: 20, step: 1, description: "Maximum target words for generated retrieval queries." },
+  { key: "priorResultPreviewChars", label: "Prior Result Preview", type: "number", defaultValue: 1000, min: 0, max: 5000, step: 100, description: "Characters of previous empty output included in retry prompts." },
+  { key: "enforceFlatJson", label: "Enforce Flat JSON", type: "boolean", defaultValue: true, description: "Adds guardrails that keep evidence and critique fields as plain text." },
+  { key: "responseMimeType", label: "Response MIME Type", type: "text", defaultValue: "application/json", description: "Generation response MIME type for model calls." },
+  { key: "inputRatePerMillion", label: "Input $ / 1M Tokens", type: "number", defaultValue: 1.5, min: 0, max: 100, step: 0.01, description: "Input token rate used for estimated run costs." },
+  { key: "outputRatePerMillion", label: "Output $ / 1M Tokens", type: "number", defaultValue: 9, min: 0, max: 100, step: 0.01, description: "Output token rate used for estimated run costs." },
+] as const;
 
-const clampEmptyResultsMaxRetries = (value: unknown): number => {
+
+type RuntimeSettingsField = (typeof runtimeSettingsSchema)[number];
+
+const defaultRuntimeSettings = runtimeSettingsSchema.reduce((settings, field) => ({
+  ...settings,
+  [field.key]: field.defaultValue,
+}), {} as RuntimeSettings);
+
+const normalizeRuntimeSettingValue = (field: RuntimeSettingsField, value: unknown): string | number | boolean => {
+  if (field.type === "boolean") return Boolean(value);
+  if (field.type === "text") {
+    const text = typeof value === "string" ? value.trim() : String(value ?? "").trim();
+    return text || field.defaultValue;
+  }
   const parsed = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(parsed)) return DEFAULT_EMPTY_RESULTS_MAX_RETRIES;
-  return Math.min(
-    MAX_EMPTY_RESULTS_MAX_RETRIES,
-    Math.max(MIN_EMPTY_RESULTS_MAX_RETRIES, Math.trunc(parsed)),
-  );
+  if (!Number.isFinite(parsed)) return field.defaultValue;
+  const stepped = field.step && field.step < 1 ? parsed : Math.trunc(parsed);
+  return Math.min(field.max, Math.max(field.min, stepped));
+};
+
+const normalizeRuntimeSettings = (settings?: Partial<RuntimeSettings>): RuntimeSettings => {
+  const normalized = runtimeSettingsSchema.reduce((nextSettings, field) => ({
+    ...nextSettings,
+    [field.key]: normalizeRuntimeSettingValue(field, settings?.[field.key]),
+  }), {} as RuntimeSettings);
+  if (normalized.queryMaxWords < normalized.queryMinWords) {
+    normalized.queryMaxWords = normalized.queryMinWords;
+  }
+  if (normalized.narrativeChunkLimit < normalized.scalarChunkLimit) {
+    normalized.narrativeChunkLimit = normalized.scalarChunkLimit;
+  }
+  return normalized;
 };
 
 const initialFields: FieldCard[] = [
@@ -700,11 +757,11 @@ function RuntimeSettingsModal({
   onChange: (settings: RuntimeSettings) => void;
   onClose: () => void;
 }) {
-  const updateEmptyResultsMaxRetries = (value: string) => {
-    onChange({
+  const updateSetting = (field: RuntimeSettingsField, value: string | boolean) => {
+    onChange(normalizeRuntimeSettings({
       ...settings,
-      emptyResultsMaxRetries: clampEmptyResultsMaxRetries(value),
-    });
+      [field.key]: normalizeRuntimeSettingValue(field, value),
+    }));
   };
 
   return (
@@ -724,7 +781,7 @@ function RuntimeSettingsModal({
               id="runtime-settings-title"
               className="mt-2 text-xl font-black text-white"
             >
-              Extraction retry controls
+              Runtime extraction controls
             </h2>
           </div>
           <button
@@ -736,23 +793,32 @@ function RuntimeSettingsModal({
           </button>
         </div>
         <div className="space-y-4 p-5">
-          <label className="block rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
-            <span className="text-xs font-black uppercase tracking-[0.18em] text-slate-300">
-              Empty Results Max Retry
-            </span>
-            <input
-              type="number"
-              min={MIN_EMPTY_RESULTS_MAX_RETRIES}
-              max={MAX_EMPTY_RESULTS_MAX_RETRIES}
-              step={1}
-              value={settings.emptyResultsMaxRetries}
-              onChange={(event) => updateEmptyResultsMaxRetries(event.target.value)}
-              className="mt-3 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm font-bold text-cyan-100 outline-none transition focus:border-cyan-300"
-            />
-            <p className="mt-2 text-xs text-slate-500">
-              Controls how many times null or empty extracted fields are retried before returning the final payload.
-            </p>
-          </label>
+          {runtimeSettingsSchema.map((field) => (
+            <label key={field.key} className="block rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
+              <span className="text-xs font-black uppercase tracking-[0.18em] text-slate-300">
+                {field.label}
+              </span>
+              {field.type === "boolean" ? (
+                <input
+                  type="checkbox"
+                  checked={Boolean(settings[field.key])}
+                  onChange={(event) => updateSetting(field, event.target.checked)}
+                  className="mt-3 h-4 w-4 accent-cyan-300"
+                />
+              ) : (
+                <input
+                  type={field.type}
+                  min={field.type === "number" ? field.min : undefined}
+                  max={field.type === "number" ? field.max : undefined}
+                  step={field.type === "number" ? field.step : undefined}
+                  value={String(settings[field.key])}
+                  onChange={(event) => updateSetting(field, event.target.value)}
+                  className="mt-3 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm font-bold text-cyan-100 outline-none transition focus:border-cyan-300"
+                />
+              )}
+              <p className="mt-2 text-xs text-slate-500">{field.description}</p>
+            </label>
+          ))}
         </div>
       </div>
     </div>
@@ -1125,11 +1191,7 @@ export default function Home() {
           ...template,
           extractionApproach:
             template.extractionApproach === "agentic" ? "agentic" : "pre_injected",
-          runtimeSettings: {
-            emptyResultsMaxRetries: clampEmptyResultsMaxRetries(
-              template.runtimeSettings?.emptyResultsMaxRetries,
-            ),
-          },
+          runtimeSettings: normalizeRuntimeSettings(template.runtimeSettings),
         }));
     } catch {
       return [];
@@ -1138,9 +1200,7 @@ export default function Home() {
   const [activeTemplateId, setActiveTemplateId] = useState<string | null>(null);
   const [extractionApproach, setExtractionApproach] =
     useState<ExtractionApproach>("pre_injected");
-  const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSettings>({
-    emptyResultsMaxRetries: DEFAULT_EMPTY_RESULTS_MAX_RETRIES,
-  });
+  const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSettings>(defaultRuntimeSettings);
   const [tokenCostMetrics, setTokenCostMetrics] =
     useState<TokenCostMetrics | null>(null);
   const [backendLogText, setBackendLogText] = useState("");
@@ -1217,11 +1277,7 @@ export default function Home() {
     setTemplateName(template.name);
     setFields(template.fields.map((field) => ({ ...field })));
     setExtractionApproach(template.extractionApproach);
-    setRuntimeSettings({
-      emptyResultsMaxRetries: clampEmptyResultsMaxRetries(
-        template.runtimeSettings?.emptyResultsMaxRetries,
-      ),
-    });
+    setRuntimeSettings(normalizeRuntimeSettings(template.runtimeSettings));
     setExtractionResults([]);
     setBatchExportRecords([]);
     setShowExtractionSuccessModal(false);
@@ -1319,13 +1375,14 @@ export default function Home() {
         fields: importedFields,
         extractionApproach:
           payload.extractionApproach === "agentic" ? "agentic" : "pre_injected",
-        runtimeSettings: {
-          emptyResultsMaxRetries: clampEmptyResultsMaxRetries(
+        runtimeSettings: normalizeRuntimeSettings({
+          ...targetTemplate?.runtimeSettings,
+          ...payload.runtimeSettings,
+          emptyResultsMaxRetries:
             payload.runtimeSettings?.emptyResultsMaxRetries ??
-              payload.emptyResultsMaxRetries ??
-              targetTemplate?.runtimeSettings?.emptyResultsMaxRetries,
-          ),
-        },
+            payload.emptyResultsMaxRetries ??
+            targetTemplate?.runtimeSettings?.emptyResultsMaxRetries,
+        }),
         updatedAt: new Date().toISOString(),
       };
 

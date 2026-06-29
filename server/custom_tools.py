@@ -28,7 +28,7 @@ def reset_current_document_id(token) -> None:
 
 
 async def _fetch_dense_matches(
-    query_embedding: list[float], document_id: str | None
+    query_embedding: list[float], document_id: str | None, limit: int = 10
 ) -> list[dict[str, object]]:
     """Return the 10 nearest pgvector chunks by cosine distance."""
 
@@ -44,10 +44,11 @@ async def _fetch_dense_matches(
                 FROM "DocumentChunk"
                 WHERE "extraction_id" = $2
                 ORDER BY "embedding" <=> $1::vector({EMBEDDING_DIMENSION})
-                LIMIT 10
+                LIMIT $3
                 ''',
                 vector_literal(query_embedding),
                 document_id,
+                limit,
             )
         else:
             rows = await client.query_raw(
@@ -55,9 +56,10 @@ async def _fetch_dense_matches(
                 SELECT "id", "chunk_text", "metadata", "embedding" <=> $1::vector({EMBEDDING_DIMENSION}) AS distance
                 FROM "DocumentChunk"
                 ORDER BY "embedding" <=> $1::vector({EMBEDDING_DIMENSION})
-                LIMIT 10
+                LIMIT $2
                 ''',
                 vector_literal(query_embedding),
+                limit,
             )
         return [dict(row) for row in rows]
     finally:
@@ -113,23 +115,33 @@ def _reciprocal_rank_fusion(rankings: list[list[dict[str, object]]], rank_consta
     return [chunk_id for chunk_id, _ in sorted(fused_scores.items(), key=lambda item: item[1], reverse=True)]
 
 
-async def _document_hybrid_search(query: str, *, chunk_limit: int = 3) -> str:
+async def _document_hybrid_search(
+    query: str,
+    *,
+    chunk_limit: int = 3,
+    max_chunk_limit: int = 10,
+    dense_limit: int = 10,
+    sparse_limit: int = 10,
+    rank_constant: int = 60,
+) -> str:
     query = query.strip()
-    chunk_limit = max(1, min(int(chunk_limit or 3), 10))
+    chunk_limit = max(1, min(int(chunk_limit or 3), int(max_chunk_limit or 10)))
+    dense_limit = max(1, int(dense_limit or 10))
+    sparse_limit = max(1, int(sparse_limit or 10))
     query_embedding = _query_embedding(query)
 
     document_id = _current_document_id.get()
     dense_matches, all_chunks = await asyncio.gather(
-        _fetch_dense_matches(query_embedding, document_id),
+        _fetch_dense_matches(query_embedding, document_id, dense_limit),
         _fetch_all_chunks(document_id),
     )
-    sparse_matches = _sparse_bm25_matches(query, all_chunks)
+    sparse_matches = _sparse_bm25_matches(query, all_chunks, limit=sparse_limit)
 
     chunks_by_id = {str(chunk.get("id")): chunk for chunk in all_chunks}
     for dense_match in dense_matches:
         chunks_by_id[str(dense_match.get("id"))] = dense_match
 
-    fused_chunk_ids = _reciprocal_rank_fusion([dense_matches, sparse_matches])[:chunk_limit]
+    fused_chunk_ids = _reciprocal_rank_fusion([dense_matches, sparse_matches], rank_constant=rank_constant)[:chunk_limit]
     if not fused_chunk_ids:
         return "No relevant chunks found."
 
@@ -142,6 +154,10 @@ async def document_hybrid_search(
     *,
     query: str | None = None,
     chunk_limit: int = 3,
+    max_chunk_limit: int = 10,
+    dense_limit: int = 10,
+    sparse_limit: int = 10,
+    rank_constant: int = 60,
 ) -> str:
     """Return top chunks using pgvector + BM25 reciprocal rank fusion.
 
@@ -150,7 +166,14 @@ async def document_hybrid_search(
     """
 
     search_query = query if query is not None else f"{field_name} {definition}".strip()
-    return await _document_hybrid_search(search_query, chunk_limit=chunk_limit)
+    return await _document_hybrid_search(
+        search_query,
+        chunk_limit=chunk_limit,
+        max_chunk_limit=max_chunk_limit,
+        dense_limit=dense_limit,
+        sparse_limit=sparse_limit,
+        rank_constant=rank_constant,
+    )
 
 
 search_tool = FunctionTool(document_hybrid_search)

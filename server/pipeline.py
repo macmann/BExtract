@@ -19,12 +19,14 @@ from google.adk.workflow import FunctionNode
 from google import genai
 
 from server.custom_tools import document_hybrid_search, search_tool
+from server.settings import RuntimeSettings, runtime_settings_from_template
 
-INPUT_RATE_PER_MILLION = 1.50
-OUTPUT_RATE_PER_MILLION = 9.00
+DEFAULT_RUNTIME_SETTINGS = RuntimeSettings()
+INPUT_RATE_PER_MILLION = DEFAULT_RUNTIME_SETTINGS.input_rate_per_million
+OUTPUT_RATE_PER_MILLION = DEFAULT_RUNTIME_SETTINGS.output_rate_per_million
 
-NARRATIVE_CONTEXT_CHUNK_LIMIT = 8
-SCALAR_CONTEXT_CHUNK_LIMIT = 3
+NARRATIVE_CONTEXT_CHUNK_LIMIT = DEFAULT_RUNTIME_SETTINGS.narrative_chunk_limit
+SCALAR_CONTEXT_CHUNK_LIMIT = DEFAULT_RUNTIME_SETTINGS.scalar_chunk_limit
 NULL_VALUES = {None, "", "null", "none", "n/a", "na", "not found", "not available"}
 MONTHS = (
     "January|February|March|April|May|June|July|August|"
@@ -39,7 +41,7 @@ FLAT_JSON_GUARD = (
     "Return only one flat JSON object. Do not place JSON inside evidence or critique_response. "
     "The evidence and critique_response fields must be plain text only. Do not include nested JSON."
 )
-EMPTY_RESULT_MAX_RETRIES = 3
+EMPTY_RESULT_MAX_RETRIES = DEFAULT_RUNTIME_SETTINGS.empty_results_max_retries
 MIN_EMPTY_RESULT_MAX_RETRIES = 0
 MAX_EMPTY_RESULT_MAX_RETRIES = 10
 
@@ -69,12 +71,13 @@ def _field_complexity(item: dict[str, Any], item_name: str) -> str:
     return "categorical_scalar"
 
 
-def _context_chunk_limit_for_complexity(field_complexity: str) -> int:
+def _context_chunk_limit_for_complexity(field_complexity: str, settings: RuntimeSettings | None = None) -> int:
     """Return the protected retrieval budget for a classified field."""
 
+    runtime_settings = settings or DEFAULT_RUNTIME_SETTINGS
     if field_complexity == "narrative":
-        return NARRATIVE_CONTEXT_CHUNK_LIMIT
-    return SCALAR_CONTEXT_CHUNK_LIMIT
+        return runtime_settings.narrative_chunk_limit
+    return runtime_settings.scalar_chunk_limit
 
 def _reset_llm_request_to_stateless_turn(callback_context=None, llm_request=None, **_kwargs) -> None:
     """Strip ADK chat history before each model call.
@@ -1021,17 +1024,7 @@ def _result_has_extracted_content(result: Any) -> bool:
 def empty_result_max_retries_from_template(template_payload: dict[str, Any]) -> int:
     """Return the UI-configured empty-result retry limit with safe bounds."""
 
-    runtime_settings = template_payload.get("runtimeSettings")
-    raw_value = None
-    if isinstance(runtime_settings, dict):
-        raw_value = runtime_settings.get("emptyResultsMaxRetries")
-    if raw_value is None:
-        raw_value = template_payload.get("emptyResultsMaxRetries")
-    try:
-        parsed = int(raw_value)
-    except (TypeError, ValueError):
-        parsed = EMPTY_RESULT_MAX_RETRIES
-    return clamp_empty_result_max_retries(parsed)
+    return runtime_settings_from_template(template_payload).empty_results_max_retries
 
 
 def clamp_empty_result_max_retries(value: int) -> int:
@@ -1051,9 +1044,10 @@ def _missing_result_item_ids(template_payload: dict[str, Any], results: dict[str
     return missing
 
 
-def _query_generation_prompt(field: Any, retry_attempt: int = 0) -> str:
+def _query_generation_prompt(field: Any, retry_attempt: int = 0, settings: RuntimeSettings | None = None) -> str:
     """Build a domain-agnostic prompt for concise retrieval keyword generation."""
 
+    runtime_settings = settings or DEFAULT_RUNTIME_SETTINGS
     field_name = str(getattr(field, "name", "") or (field.get("name", "") if isinstance(field, dict) else ""))
     field_definition = str(
         getattr(field, "definition", "") or (field.get("definition", "") if isinstance(field, dict) else "")
@@ -1066,7 +1060,8 @@ def _query_generation_prompt(field: Any, retry_attempt: int = 0) -> str:
         )
     return (
         f"You are an expert search query generator. Based on the target field '{field_name}' "
-        f"and its definition '{field_definition}', generate a 3 to 5 word concise search query "
+        f"and its definition '{field_definition}', generate a {runtime_settings.query_min_words} to "
+        f"{runtime_settings.query_max_words} word concise search query "
         "to find this exact information in the source document. Ignore instruction verbs like "
         "'summarise', 'format', or 'extract'. Return ONLY the keywords."
         f"{retry_instruction}"
@@ -1091,7 +1086,9 @@ def _pre_injected_prompt(
     retry_attempt: int = 0,
     max_retries: int = EMPTY_RESULT_MAX_RETRIES,
     prior_result: Any = None,
+    settings: RuntimeSettings | None = None,
 ) -> str:
+    runtime_settings = settings or DEFAULT_RUNTIME_SETTINGS
     item_type = str(item.get("type") or item.get("routeType") or "Scalar")
     definition = str(item.get("definition") or item.get("description") or "")
     data_type = str(item.get("dataType") or item.get("data_type") or "String")
@@ -1099,7 +1096,7 @@ def _pre_injected_prompt(
         "You are extracting one field from a document using only the retrieved evidence below.\n"
         "Return strict JSON only. Do not wrap the JSON in markdown.\n"
         "Required keys: item_id, field_name, value, unit, confidence, evidence, critique_response.\n"
-        f"{FLAT_JSON_GUARD}\n"
+        f"{FLAT_JSON_GUARD if runtime_settings.enforce_flat_json else ''}\n"
         "For tabular fields, put the parsed row array in value.\n\n"
         f"Item ID: {item_id}\n"
         f"Field name: {item_name}\n"
@@ -1120,7 +1117,7 @@ def _pre_injected_prompt(
         base_prompt += (
             f"Retry policy: this is empty-result verification retry {retry_attempt} of "
             f"{max_retries}. The previous extraction returned no usable value: "
-            f"{json.dumps(prior_result, default=str)[:1000]}. Re-check the evidence with a "
+            f"{json.dumps(prior_result, default=str)[:runtime_settings.prior_result_preview_chars]}. Re-check the evidence with a "
             "different interpretation of labels, abbreviations, and table context. Return a value "
             "as soon as the evidence supports one. Only return null/empty after explicitly verifying "
             "the supplied evidence does not contain the requested information.\n"
@@ -1182,11 +1179,13 @@ async def _extract_isolated_field(
     retry_attempt: int = 0,
     max_retries: int = EMPTY_RESULT_MAX_RETRIES,
     prior_result: Any = None,
+    settings: RuntimeSettings | None = None,
 ) -> dict[str, Any]:
     """Extract one template field in its own query, retrieval, and LLM context."""
 
+    runtime_settings = settings or DEFAULT_RUNTIME_SETTINGS
     definition = str(item.get("definition") or item.get("description") or "")
-    query_prompt = _query_generation_prompt(item, retry_attempt=retry_attempt)
+    query_prompt = _query_generation_prompt(item, retry_attempt=retry_attempt, settings=runtime_settings)
     query_response = await client.aio.models.generate_content(
         model=model,
         contents=query_prompt,
@@ -1212,10 +1211,21 @@ async def _extract_isolated_field(
         fallback_query,
     )
     field_complexity = _field_complexity(item, item_name)
-    chunk_limit = _context_chunk_limit_for_complexity(field_complexity)
+    chunk_limit = _context_chunk_limit_for_complexity(field_complexity, runtime_settings)
     if retry_attempt:
-        chunk_limit = max(chunk_limit + retry_attempt * 2, NARRATIVE_CONTEXT_CHUNK_LIMIT)
-    chunks = await document_hybrid_search(query=generated_clean_query, chunk_limit=chunk_limit)
+        chunk_limit = max(
+            chunk_limit + retry_attempt * runtime_settings.retry_chunk_expansion_step,
+            runtime_settings.narrative_chunk_limit,
+        )
+    chunk_limit = min(chunk_limit, runtime_settings.max_chunk_limit)
+    chunks = await document_hybrid_search(
+        query=generated_clean_query,
+        chunk_limit=chunk_limit,
+        max_chunk_limit=runtime_settings.max_chunk_limit,
+        dense_limit=runtime_settings.dense_candidate_limit,
+        sparse_limit=runtime_settings.sparse_candidate_limit,
+        rank_constant=runtime_settings.rank_fusion_constant,
+    )
     prompt = _pre_injected_prompt(
         item,
         item_id,
@@ -1225,8 +1235,9 @@ async def _extract_isolated_field(
         retry_attempt=retry_attempt,
         max_retries=max_retries,
         prior_result=prior_result,
+        settings=runtime_settings,
     )
-    generation_config = {"response_mime_type": "application/json"}
+    generation_config = {"response_mime_type": runtime_settings.response_mime_type}
     response = await client.aio.models.generate_content(
         model=model,
         contents=prompt,
@@ -1280,6 +1291,9 @@ async def run_pre_injected_extraction(
     """Run stateless per-field RAG extraction without ADK Runner orchestration."""
 
     yield "Executing stateless extraction..."
+    runtime_settings = runtime_settings_from_template(template)
+    if model == DEFAULT_RUNTIME_SETTINGS.extraction_model:
+        model = runtime_settings.extraction_model
     client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
     extraction_results: dict[str, Any] = {}
     events: list[dict[str, Any]] = []
@@ -1306,6 +1320,7 @@ async def run_pre_injected_extraction(
             item=item,
             item_id=item_id,
             item_name=item_name,
+            settings=runtime_settings,
         )
         extraction_results[item_id] = apply_month_year_date_fallback(
             field_output["result"],
@@ -1333,6 +1348,7 @@ async def run_pre_injected_extraction(
                 retry_attempt=retry_attempt,
                 max_retries=max_retries,
                 prior_result=extraction_results[item_id],
+                settings=runtime_settings,
             )
             extraction_results[item_id] = retry_output["result"]
             events.extend(retry_output["events"])
@@ -1371,6 +1387,9 @@ async def retry_empty_extraction_results(
     extraction approach gets the same up-to-three empty-result verification loop.
     """
 
+    runtime_settings = runtime_settings_from_template(template)
+    if model == DEFAULT_RUNTIME_SETTINGS.extraction_model:
+        model = runtime_settings.extraction_model
     missing_item_ids = set(_missing_result_item_ids(template, existing_results))
     if not missing_item_ids:
         return
@@ -1413,6 +1432,7 @@ async def retry_empty_extraction_results(
                 retry_attempt=retry_attempt,
                 max_retries=max_retries,
                 prior_result=prior_result,
+                settings=runtime_settings,
             )
             retried_results[item_id] = field_output["result"]
             events.extend(field_output["events"])
