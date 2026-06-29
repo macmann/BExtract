@@ -23,6 +23,7 @@ from google.genai import types
 from pydantic import BaseModel, ConfigDict
 
 from server.ingestion import ingest_document
+from server.db_schema import ensure_file_extraction_source_path_column
 from server.custom_tools import reset_current_document_id, set_current_document_id
 from server.routes.results import router as results_router
 from server.pipeline import (
@@ -98,6 +99,11 @@ async def log_document_chunk_embedding_column_type() -> None:
 
 @app.on_event("startup")
 async def startup_database_introspection() -> None:
+    client = await _new_prisma_client()
+    try:
+        await ensure_file_extraction_source_path_column(client)
+    finally:
+        await client.disconnect()
     await log_document_chunk_embedding_column_type()
 
 
@@ -205,6 +211,7 @@ def _source_pdf_path(run_id: str, extraction_id: str, file_name: str) -> Path:
 async def _set_file_extraction_source_path(extraction_id: str, source_file_path: str) -> None:
     client = await _new_prisma_client()
     try:
+        await ensure_file_extraction_source_path_column(client)
         await client.execute_raw(
             'UPDATE "file_extractions" SET "source_file_path" = $2 WHERE "id" = $1::uuid',
             extraction_id,
