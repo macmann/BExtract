@@ -9,3 +9,7 @@ PyPDF2
 prisma
 google-generativeai
 PyMuPDF
+google-genai
+openai
+pdf2image
+Pillow

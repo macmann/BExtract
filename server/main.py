@@ -22,7 +22,6 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel, ConfigDict
 
-from server.ingestion import ingest_document
 from server.db_schema import ensure_file_extraction_source_path_column
 from server.custom_tools import reset_current_document_id, set_current_document_id
 from server.routes.results import router as results_router
@@ -38,6 +37,7 @@ from server.pipeline import (
     record_node_token_audit,
     retry_empty_extraction_results,
     run_pre_injected_extraction,
+    index_pdf_for_retrieval,
     workflow_progress,
 )
 
@@ -363,10 +363,12 @@ async def _run_adk_workflow(graph: Any, payload: dict[str, Any]) -> Any:
 async def _ingest_document_with_progress(
     uploaded_bytes: bytes,
     document_id: str,
+    file_path: Path,
+    template_payload: dict[str, Any],
     remember_log,
     status_formatter=lambda status: status,
-) -> AsyncIterator[str | list[Any]]:
-    """Run ingestion in a background task while streaming progress messages."""
+) -> AsyncIterator[str | dict[str, Any]]:
+    """Run PDF indexing in a background task while streaming progress messages."""
 
     progress_queue: asyncio.Queue[str | None] = asyncio.Queue()
 
@@ -374,7 +376,13 @@ async def _ingest_document_with_progress(
         await progress_queue.put(message)
 
     ingestion_task = asyncio.create_task(
-        ingest_document(uploaded_bytes, document_id=document_id, progress_callback=progress_callback)
+        index_pdf_for_retrieval(
+            file_path=file_path,
+            uploaded_bytes=uploaded_bytes,
+            document_id=document_id,
+            template_payload=template_payload,
+            progress_callback=progress_callback,
+        )
     )
 
     while not ingestion_task.done():
@@ -542,14 +550,29 @@ async def _extract_stream(
                     await _set_file_extraction_source_path(document_id_override, str(source_pdf_path))
 
             yield _sse("log", {"tone": "info", "status": prefixed_status(f"Document accepted: {file_name}"), "message": remember_log(f"Document accepted: {file_name}")})
-            chunks = []
-            async for ingestion_event in _ingest_document_with_progress(uploaded_bytes, document_id, remember_log, prefixed_status):
+            indexing_result: dict[str, Any] = {"mode": "pypdf", "indexed_count": 0, "chunks": [], "raw_text": ""}
+            indexing_file_path = source_pdf_path
+            if indexing_file_path is None:
+                indexing_file_path = SOURCE_PDF_DIR / "transient" / f"{uuid.uuid4().hex}_{file_name}"
+                indexing_file_path.parent.mkdir(parents=True, exist_ok=True)
+                indexing_file_path.write_bytes(uploaded_bytes)
+
+            async for ingestion_event in _ingest_document_with_progress(
+                uploaded_bytes,
+                document_id,
+                indexing_file_path,
+                template_payload,
+                remember_log,
+                prefixed_status,
+            ):
                 if isinstance(ingestion_event, str):
                     yield ingestion_event
                 else:
-                    chunks = ingestion_event
-            raw_text = "\n\n".join(chunk.content for chunk in chunks)
-            yield _sse("log", {"tone": "success", "status": prefixed_status(f"Indexed {len(chunks)} PDF text chunks"), "message": remember_log(f"{len(chunks)} PDF text chunks indexed for hybrid retrieval.")})
+                    indexing_result = ingestion_event
+            raw_text = str(indexing_result.get("raw_text") or "")
+            indexed_count = int(indexing_result.get("indexed_count", 0) or 0)
+            indexing_mode = str(indexing_result.get("mode") or "pypdf")
+            yield _sse("log", {"tone": "success", "status": prefixed_status(f"Indexed {indexed_count} PDF chunks"), "message": remember_log(f"{indexed_count} PDF chunks indexed for hybrid retrieval via {indexing_mode}.")})
 
             items = _template_items(template_payload)
             extraction_results: dict[str, Any] = {}

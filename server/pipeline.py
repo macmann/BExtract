@@ -7,8 +7,9 @@ import importlib.util
 import json
 import os
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from google.adk import Workflow
@@ -20,6 +21,96 @@ from google import genai
 
 from server.custom_tools import document_hybrid_search, search_tool
 from server.settings import RuntimeSettings, runtime_settings_from_template
+
+
+ProgressCallback = Callable[[str], Awaitable[None]]
+
+
+def is_scanned_pdf(file_path: str | Path, *, sample_pages: int = 3, min_text_chars: int = 40) -> bool:
+    """Return True when a PDF appears to have no useful embedded text layer.
+
+    The fast ingestion path relies on PyPDF2 text extraction.  If the sampled
+    pages produce almost no text, treat the document as scanned/image-only so it
+    can be routed through the LLM OCR pre-processor before normal RAG extraction.
+    """
+
+    from PyPDF2 import PdfReader
+
+    reader = PdfReader(str(file_path))
+    text_chars = 0
+    pages_to_sample = min(len(reader.pages), max(int(sample_pages or 1), 1))
+    for page_index in range(pages_to_sample):
+        page_text = reader.pages[page_index].extract_text() or ""
+        text_chars += len(page_text.strip())
+        if text_chars >= min_text_chars:
+            return False
+    return True
+
+
+def _llm_ocr_settings_from_template(template_payload: dict[str, Any]) -> tuple[str, str]:
+    runtime_settings = runtime_settings_from_template(template_payload)
+    raw_settings = template_payload.get("runtimeSettings")
+    settings = raw_settings if isinstance(raw_settings, dict) else {}
+
+    model_name = str(
+        settings.get("ocrModel")
+        or settings.get("llmOcrModel")
+        or settings.get("visionModel")
+        or runtime_settings.extraction_model
+    ).strip()
+    provider = str(
+        settings.get("ocrProvider")
+        or settings.get("llmOcrProvider")
+        or settings.get("visionProvider")
+        or ("openai" if model_name.lower().startswith(("gpt-", "o1", "o3", "o4")) else "gemini")
+    ).strip().lower()
+    return provider, model_name
+
+
+async def index_pdf_for_retrieval(
+    *,
+    file_path: str | Path,
+    uploaded_bytes: bytes,
+    document_id: str,
+    template_payload: dict[str, Any],
+    progress_callback: ProgressCallback | None = None,
+) -> dict[str, Any]:
+    """Index one PDF through the digital fast path or scanned LLM-OCR path.
+
+    This pre-processing step completes before the standard RAG extraction engine
+    runs, so scalar/narrative retrieval budgets remain unchanged downstream.
+    """
+
+    async def report(message: str) -> None:
+        print(message, flush=True)
+        if progress_callback is not None:
+            await progress_callback(message)
+
+    file_path = Path(file_path)
+    if is_scanned_pdf(file_path):
+        from server.utils.llm_ocr_ingest import process_and_index_scanned_pdf
+
+        provider, model_name = _llm_ocr_settings_from_template(template_payload)
+        await report(f"Detected scanned PDF; running LLM OCR with {provider}:{model_name}.")
+        indexed_pages = await process_and_index_scanned_pdf(
+            str(file_path),
+            run_id=document_id,
+            provider=provider,
+            model_name=model_name,
+        )
+        await report(f"Indexed {indexed_pages} LLM-OCR page chunk(s) for document {document_id}.")
+        return {"mode": "llm_ocr", "indexed_count": indexed_pages, "chunks": [], "raw_text": ""}
+
+    from server.ingestion import ingest_document
+
+    await report("Detected digital text PDF; using PyPDF text extraction and chunking.")
+    chunks = await ingest_document(uploaded_bytes, document_id=document_id, progress_callback=progress_callback)
+    return {
+        "mode": "pypdf",
+        "indexed_count": len(chunks),
+        "chunks": chunks,
+        "raw_text": "\n\n".join(chunk.content for chunk in chunks),
+    }
 
 DEFAULT_RUNTIME_SETTINGS = RuntimeSettings()
 INPUT_RATE_PER_MILLION = DEFAULT_RUNTIME_SETTINGS.input_rate_per_million
