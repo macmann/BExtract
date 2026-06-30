@@ -2,13 +2,14 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ChevronDown, Download, FileText, TerminalSquare, X } from "lucide-react";
-import { fetchHistoricalRun, type HistoricalRun, type RunDocument, type RunStatus, type SourceBBox, type SourceChunk, type SourceWord } from "@/lib/results-data";
+import { ArrowLeft, CheckCircle2, ChevronDown, Download, FileText, Loader2, Save, TerminalSquare, X } from "lucide-react";
+import { fetchHistoricalRun, verifyExtraction, type HistoricalRun, type RunDocument, type RunStatus, type SourceBBox, type SourceChunk, type SourceWord } from "@/lib/results-data";
 
 const statusStyles: Record<RunStatus, string> = {
   success: "border-emerald-400/30 bg-emerald-400/10 text-emerald-200",
   processing: "border-yellow-300/30 bg-yellow-300/10 text-yellow-100",
   failure: "border-red-400/30 bg-red-400/10 text-red-200",
+  human_verified: "border-cyan-300/30 bg-cyan-300/10 text-cyan-100",
 };
 
 function formatDate(value: string) {
@@ -226,6 +227,9 @@ export default function RunInspectorClient({ runId }: { runId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [selectedSources, setSelectedSources] = useState<{ document: RunDocument; fieldName: string; fieldValue: unknown; sources: SourceChunk[] } | null>(null);
+  const [correctedValues, setCorrectedValues] = useState<Record<string, string>>({});
+  const [verificationStatus, setVerificationStatus] = useState<Record<string, { tone: "success" | "error"; message: string }>>({});
+  const [submittingVerification, setSubmittingVerification] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     let isMounted = true;
@@ -252,6 +256,57 @@ export default function RunInspectorClient({ runId }: { runId: string }) {
     () => (run ? run.inputTokens + run.outputTokens : 0),
     [run],
   );
+
+  async function submitVerification(document: RunDocument, field: DisplayField, correctedValue: unknown) {
+    const primaryContext = field.sources.find((source) => source.chunk_text.trim().length > 0)?.chunk_text;
+    const statusKey = `${document.id}:${field.id}`;
+    if (!primaryContext) {
+      setVerificationStatus((current) => ({
+        ...current,
+        [statusKey]: { tone: "error", message: "Verification requires at least one source chunk for context." },
+      }));
+      return;
+    }
+
+    setSubmittingVerification((current) => ({ ...current, [statusKey]: true }));
+    setVerificationStatus((current) => ({ ...current, [statusKey]: { tone: "success", message: "Saving verification…" } }));
+    try {
+      await verifyExtraction(document.id, {
+        template_id: run?.templateId,
+        fields: [
+          {
+            field_id: field.id,
+            corrected_value: correctedValue,
+            input_context_chunk: primaryContext,
+          },
+        ],
+      });
+      setRun((current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          documents: current.documents.map((candidate) => (
+            candidate.id === document.id ? { ...candidate, status: "human_verified" } : candidate
+          )),
+        };
+      });
+      setVerificationStatus((current) => ({
+        ...current,
+        [statusKey]: { tone: "success", message: "Saved as a human-verified example for future batches." },
+      }));
+    } catch (verifyError) {
+      setVerificationStatus((current) => ({
+        ...current,
+        [statusKey]: {
+          tone: "error",
+          message: verifyError instanceof Error ? verifyError.message : "Failed to save verification.",
+        },
+      }));
+    } finally {
+      setSubmittingVerification((current) => ({ ...current, [statusKey]: false }));
+    }
+  }
+
 
   if (!run) {
     return (
@@ -339,25 +394,64 @@ export default function RunInspectorClient({ runId }: { runId: string }) {
                     <span>Extracted fields</span>
                     <span>Sources</span>
                   </div>
-                  {extractedFields(document).length > 0 ? extractedFields(document).map((field) => (
-                    <div key={field.id} className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 border-b border-slate-800/80 px-4 py-3 last:border-b-0">
-                      <div>
-                        <p className="text-sm font-semibold text-white">{field.name}</p>
-                        <pre className="mt-1 whitespace-pre-wrap break-words font-sans text-sm text-slate-300">{displayValue(field.value)}</pre>
-                        <div className="mt-2 flex flex-wrap gap-3 text-xs text-slate-500">
-                          {field.confidence !== undefined && <span>Confidence: {String(field.confidence)}</span>}
-                          {Boolean(field.evidence) && <span>Evidence: {String(field.evidence)}</span>}
+                  {extractedFields(document).length > 0 ? extractedFields(document).map((field) => {
+                    const statusKey = `${document.id}:${field.id}`;
+                    const editedValue = correctedValues[statusKey] ?? displayValue(field.value);
+                    const fieldStatus = verificationStatus[statusKey];
+                    const isSubmitting = Boolean(submittingVerification[statusKey]);
+                    const hasContext = field.sources.some((source) => source.chunk_text.trim().length > 0);
+                    return (
+                      <div key={field.id} className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 border-b border-slate-800/80 px-4 py-3 last:border-b-0">
+                        <div>
+                          <p className="text-sm font-semibold text-white">{field.name}</p>
+                          <pre className="mt-1 whitespace-pre-wrap break-words font-sans text-sm text-slate-300">{displayValue(field.value)}</pre>
+                          <div className="mt-2 flex flex-wrap gap-3 text-xs text-slate-500">
+                            {field.confidence !== undefined && <span>Confidence: {String(field.confidence)}</span>}
+                            {Boolean(field.evidence) && <span>Evidence: {String(field.evidence)}</span>}
+                          </div>
+                          <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-950/70 p-3">
+                            <label className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500" htmlFor={`correction-${statusKey}`}>
+                              Human correction / approval
+                            </label>
+                            <textarea
+                              id={`correction-${statusKey}`}
+                              value={editedValue}
+                              onChange={(event) => setCorrectedValues((current) => ({ ...current, [statusKey]: event.target.value }))}
+                              className="mt-2 min-h-20 w-full resize-y rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-cyan-300/70"
+                              placeholder="Enter the corrected value to save as the golden answer"
+                            />
+                            <div className="mt-3 flex flex-wrap items-center gap-2">
+                              <button
+                                disabled={isSubmitting || !hasContext}
+                                onClick={() => submitVerification(document, field, field.value)}
+                                className="inline-flex items-center gap-2 rounded-lg border border-emerald-300/30 bg-emerald-300/10 px-3 py-2 text-xs font-bold text-emerald-100 hover:bg-emerald-300/15 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-900 disabled:text-slate-600"
+                              >
+                                {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />} Approve current
+                              </button>
+                              <button
+                                disabled={isSubmitting || !hasContext || editedValue.trim().length === 0}
+                                onClick={() => submitVerification(document, field, editedValue)}
+                                className="inline-flex items-center gap-2 rounded-lg border border-cyan-300/30 bg-cyan-300/10 px-3 py-2 text-xs font-bold text-cyan-100 hover:bg-cyan-300/15 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-900 disabled:text-slate-600"
+                              >
+                                {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Save override
+                              </button>
+                              {!hasContext && <span className="text-xs text-yellow-100">A source chunk is required before verification can be saved.</span>}
+                            </div>
+                            {fieldStatus && (
+                              <p className={`mt-2 text-xs ${fieldStatus.tone === "success" ? "text-emerald-200" : "text-red-200"}`}>{fieldStatus.message}</p>
+                            )}
+                          </div>
                         </div>
+                        <button
+                          disabled={field.sources.length === 0}
+                          onClick={() => setSelectedSources({ document, fieldName: field.name, fieldValue: field.value, sources: field.sources })}
+                          className="self-start rounded-lg border border-cyan-300/30 bg-cyan-300/10 px-3 py-1.5 text-xs font-bold text-cyan-100 hover:bg-cyan-300/15 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-900 disabled:text-slate-600"
+                        >
+                          View source
+                        </button>
                       </div>
-                      <button
-                        disabled={field.sources.length === 0}
-                        onClick={() => setSelectedSources({ document, fieldName: field.name, fieldValue: field.value, sources: field.sources })}
-                        className="self-start rounded-lg border border-cyan-300/30 bg-cyan-300/10 px-3 py-1.5 text-xs font-bold text-cyan-100 hover:bg-cyan-300/15 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-900 disabled:text-slate-600"
-                      >
-                        View source
-                      </button>
-                    </div>
-                  )) : (
+                    );
+                  }) : (
                     <p className="px-4 py-3 text-sm text-slate-500">No extracted payload available.</p>
                   )}
                 </div>

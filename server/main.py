@@ -24,6 +24,8 @@ from pydantic import BaseModel, ConfigDict
 
 from server.db_schema import ensure_file_extraction_source_path_column
 from server.custom_tools import reset_current_document_id, set_current_document_id
+from server.routes.evals import router as evals_router
+from server.routes.extractions import router as extractions_router
 from server.routes.results import router as results_router
 from server.pipeline import (
     build_dynamic_graph,
@@ -52,6 +54,8 @@ if missing_env_vars:
 
 app = FastAPI(title="BExtractor API")
 app.include_router(results_router)
+app.include_router(extractions_router)
+app.include_router(evals_router)
 
 CLIENT_OUT_DIR = (Path(__file__).resolve().parent / ".." / "client" / "out").resolve()
 EXPORT_DIR = (Path(__file__).resolve().parent / "exports").resolve()

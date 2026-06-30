@@ -1,4 +1,4 @@
-export type RunStatus = "success" | "processing" | "failure";
+export type RunStatus = "success" | "processing" | "failure" | "human_verified";
 
 export type SourceWord = { text: string; x0?: number; y0?: number; x1?: number; y1?: number; index?: number };
 
@@ -85,7 +85,7 @@ type ApiFile = {
 };
 
 function normalizeStatus(status?: string | null): RunStatus {
-  if (status === "success" || status === "processing" || status === "failure") return status;
+  if (status === "success" || status === "processing" || status === "failure" || status === "human_verified") return status;
   if (status === "completed") return "success";
   if (status === "failed" || status === "error") return "failure";
   return "processing";
@@ -192,4 +192,34 @@ export async function fetchHistoricalRun(runId: string): Promise<HistoricalRun |
 export async function deleteHistoricalRun(runId: string): Promise<void> {
   const response = await fetch(`/api/results/${encodeURIComponent(runId)}`, { method: "DELETE" });
   if (!response.ok) throw new Error(`Failed to delete result ${runId} (${response.status})`);
+}
+
+
+export type VerifyExtractionFieldPayload = {
+  field_id: string;
+  corrected_value: unknown;
+  input_context_chunk: string;
+};
+
+export type VerifyExtractionPayload = {
+  fields: VerifyExtractionFieldPayload[];
+  template_id?: string | null;
+};
+
+export async function verifyExtraction(extractionId: string, payload: VerifyExtractionPayload): Promise<void> {
+  const response = await fetch(`/api/extractions/${encodeURIComponent(extractionId)}/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    let detail = `Failed to verify extraction (${response.status})`;
+    try {
+      const body = (await response.json()) as { detail?: unknown };
+      if (body.detail) detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+    } catch {
+      // Keep the status-based fallback when the API response is not JSON.
+    }
+    throw new Error(detail);
+  }
 }
