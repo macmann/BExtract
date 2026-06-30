@@ -636,6 +636,7 @@ def test_run_pre_injected_extraction_transforms_query_without_example_format(mon
             "dense_limit": 10,
             "sparse_limit": 10,
             "rank_constant": 60,
+            "structured": True,
         }
     ]
     query_prompt = DummyGenAI.last_client.aio.models.prompts[0]["contents"]
@@ -752,6 +753,7 @@ def test_run_pre_injected_extraction_isolates_each_field_context(monkeypatch):
             "dense_limit": 10,
             "sparse_limit": 10,
             "rank_constant": 60,
+            "structured": True,
         },
         {
             "query": "capital ratio keywords",
@@ -760,6 +762,7 @@ def test_run_pre_injected_extraction_isolates_each_field_context(monkeypatch):
             "dense_limit": 10,
             "sparse_limit": 10,
             "rank_constant": 60,
+            "structured": True,
         },
     ]
     prompts = [call["contents"] for call in DummyGenAI.last_client.aio.models.prompts]
@@ -776,3 +779,46 @@ def test_run_pre_injected_extraction_isolates_each_field_context(monkeypatch):
     assert "Decision drivers" not in prompts[3]
     assert events[-1]["results"]["decision_drivers"]["value"] == "Downgrade trigger"
     assert events[-1]["results"]["capital_ratio"]["value"] == "12.5%"
+
+
+def test_format_verified_examples_for_prompt_limits_to_two_structural_examples():
+    from server.pipeline import _format_verified_examples_for_prompt
+
+    prompt_block = _format_verified_examples_for_prompt(
+        [
+            {"input_context_chunk": "Chunk A", "corrected_value": {"value": "A"}},
+            {"input_context_chunk": "Chunk B", "corrected_value": "B"},
+            {"input_context_chunk": "Chunk C", "corrected_value": "C"},
+        ]
+    )
+
+    assert prompt_block.startswith("### VERIFIED EXTRACTION EXAMPLES ###\n")
+    assert "Context: Chunk A" in prompt_block
+    assert 'Target Output: {"value": "A"}' in prompt_block
+    assert "Context: Chunk B" in prompt_block
+    assert "Target Output: B" in prompt_block
+    assert "Chunk C" not in prompt_block
+    assert prompt_block.rstrip().endswith("### END EXAMPLES ###")
+
+
+def test_pre_injected_prompt_includes_verified_examples_before_retrieved_records():
+    from server.pipeline import _pre_injected_prompt
+
+    prompt = _pre_injected_prompt(
+        {"definition": "Extract the rating action."},
+        "rating_action",
+        "Rating Action",
+        [{"chunk_id": "chunk_1", "text": "current document context"}],
+        verified_examples_prompt=(
+            "### VERIFIED EXTRACTION EXAMPLES ###\n"
+            "Context: prior reviewed context\n"
+            "Target Output: Affirmed\n"
+            "### END EXAMPLES ###\n"
+        ),
+    )
+
+    examples_index = prompt.index("### VERIFIED EXTRACTION EXAMPLES ###")
+    records_index = prompt.index("Retrieved source records:")
+    assert examples_index < records_index
+    assert "Context: prior reviewed context" in prompt
+    assert "Target Output: Affirmed" in prompt
