@@ -164,6 +164,16 @@ DIRECT_URL="postgresql://USER:PASSWORD@HOST:PORT/DATABASE?sslmode=require"
 
 > **Note:** The FastAPI server validates these variables on startup and exits early if any are missing.
 
+### One-command first-time startup
+
+After setting `GOOGLE_API_KEY`, `DATABASE_URL`, and `DIRECT_URL` in your shell or a root `.env` file, you can bootstrap dependencies, build the frontend, sync Prisma, generate clients, and start FastAPI with:
+
+```bash
+./scripts/first_time_start.sh
+```
+
+The script uses Prisma CLI `6.19.0` by default for compatibility with the current schema syntax. Override with `PRISMA_CLI_VERSION`, `PYTHON_BIN`, `HOST`, or `PORT` if needed.
+
 ### Step 1: Build the Frontend
 
 The frontend is a strict static export. Build it before starting the backend so FastAPI can serve `client/out` at `/`.

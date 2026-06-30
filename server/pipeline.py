@@ -1138,6 +1138,77 @@ def _missing_result_item_ids(template_payload: dict[str, Any], results: dict[str
     return missing
 
 
+
+def _template_id(template: dict[str, Any]) -> str:
+    """Return the active template identifier used for field-level learning."""
+
+    return str(template.get("id") or template.get("template_id") or template.get("templateId") or "")
+
+
+def _format_corrected_value_for_example(corrected_value: Any) -> str:
+    """Render a verified target value consistently for prompt demonstrations."""
+
+    if isinstance(corrected_value, str):
+        return corrected_value
+    return json.dumps(corrected_value, ensure_ascii=False, default=str)
+
+
+def _format_verified_examples_for_prompt(examples: list[dict[str, Any]]) -> str:
+    """Format verified examples as a compact system-instruction prompt block."""
+
+    if not examples:
+        return ""
+
+    formatted_examples: list[str] = ["### VERIFIED EXTRACTION EXAMPLES ###"]
+    for example in examples[:2]:
+        formatted_examples.append(f"Context: {str(example.get('input_context_chunk') or '').strip()}")
+        formatted_examples.append(
+            f"Target Output: {_format_corrected_value_for_example(example.get('corrected_value'))}"
+        )
+    formatted_examples.append("### END EXAMPLES ###")
+    return "\n".join(formatted_examples) + "\n"
+
+
+async def _fetch_verified_field_examples(template_id: str, field_id: str, *, limit: int = 2) -> list[dict[str, Any]]:
+    """Fetch recent human-verified examples for the current template field."""
+
+    if not template_id or not field_id or limit <= 0:
+        return []
+
+    client = None
+    try:
+        from prisma import Prisma
+
+        client = Prisma()
+        await client.connect()
+        rows = await client.query_raw(
+            """
+            SELECT "input_context_chunk", "corrected_value"
+            FROM "verified_field_examples"
+            WHERE "template_id" = $1 AND "field_id" = $2
+            ORDER BY "updated_at" DESC, "created_at" DESC
+            LIMIT $3
+            """,
+            template_id,
+            field_id,
+            limit,
+        )
+    except Exception as exc:
+        # Learning examples should improve extraction quality, but their absence
+        # must never block a production extraction batch (for example, before the
+        # verification migration has been applied in an older environment).
+        print(
+            f"WARNING: unable to load verified examples for template={template_id} field={field_id}: {exc}",
+            flush=True,
+        )
+        return []
+    finally:
+        if client is not None:
+            await client.disconnect()
+
+    return [dict(row) for row in rows]
+
+
 def _query_generation_prompt(field: Any, retry_attempt: int = 0, settings: RuntimeSettings | None = None) -> str:
     """Build a domain-agnostic prompt for concise retrieval keyword generation."""
 
@@ -1181,6 +1252,7 @@ def _pre_injected_prompt(
     max_retries: int = EMPTY_RESULT_MAX_RETRIES,
     prior_result: Any = None,
     settings: RuntimeSettings | None = None,
+    verified_examples_prompt: str = "",
 ) -> str:
     runtime_settings = settings or DEFAULT_RUNTIME_SETTINGS
     item_type = str(item.get("type") or item.get("routeType") or "Scalar")
@@ -1225,6 +1297,9 @@ def _pre_injected_prompt(
             "[EXPECTED FORMAT EXAMPLE]\n"
             f"{example_format}\n"
         )
+
+    if verified_examples_prompt:
+        base_prompt += "\n" + verified_examples_prompt + "\n"
 
     if isinstance(chunks, list):
         chunk_context = json.dumps(chunks, ensure_ascii=False, default=str, indent=2)
@@ -1276,6 +1351,7 @@ async def _extract_isolated_field(
     item: dict[str, Any],
     item_id: str,
     item_name: str,
+    template_id: str = "",
     retry_attempt: int = 0,
     max_retries: int = EMPTY_RESULT_MAX_RETRIES,
     prior_result: Any = None,
@@ -1318,6 +1394,9 @@ async def _extract_isolated_field(
             runtime_settings.narrative_chunk_limit,
         )
     chunk_limit = min(chunk_limit, runtime_settings.max_chunk_limit)
+    verified_examples = await _fetch_verified_field_examples(template_id, item_id, limit=2)
+    verified_examples_prompt = _format_verified_examples_for_prompt(verified_examples)
+
     source_records = await document_hybrid_search(
         query=generated_clean_query,
         chunk_limit=chunk_limit,
@@ -1337,6 +1416,7 @@ async def _extract_isolated_field(
         max_retries=max_retries,
         prior_result=prior_result,
         settings=runtime_settings,
+        verified_examples_prompt=verified_examples_prompt,
     )
     generation_config = {"response_mime_type": runtime_settings.response_mime_type}
     response = await client.aio.models.generate_content(
@@ -1401,6 +1481,7 @@ async def run_pre_injected_extraction(
 
     yield "Executing stateless extraction..."
     runtime_settings = runtime_settings_from_template(template)
+    template_id = _template_id(template)
     if model == DEFAULT_RUNTIME_SETTINGS.extraction_model:
         model = runtime_settings.extraction_model
     client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
@@ -1429,6 +1510,7 @@ async def run_pre_injected_extraction(
             item=item,
             item_id=item_id,
             item_name=item_name,
+            template_id=template_id,
             settings=runtime_settings,
         )
         extraction_results[item_id] = apply_month_year_date_fallback(
@@ -1454,6 +1536,7 @@ async def run_pre_injected_extraction(
                 item=item,
                 item_id=item_id,
                 item_name=item_name,
+                template_id=template_id,
                 retry_attempt=retry_attempt,
                 max_retries=max_retries,
                 prior_result=extraction_results[item_id],
@@ -1497,6 +1580,7 @@ async def retry_empty_extraction_results(
     """
 
     runtime_settings = runtime_settings_from_template(template)
+    template_id = _template_id(template)
     if model == DEFAULT_RUNTIME_SETTINGS.extraction_model:
         model = runtime_settings.extraction_model
     missing_item_ids = set(_missing_result_item_ids(template, existing_results))
@@ -1538,6 +1622,7 @@ async def retry_empty_extraction_results(
                 item=item,
                 item_id=item_id,
                 item_name=item_name,
+                template_id=template_id,
                 retry_attempt=retry_attempt,
                 max_retries=max_retries,
                 prior_result=prior_result,

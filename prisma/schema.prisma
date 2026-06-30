@@ -19,6 +19,7 @@ enum PipelineExecutionStatus {
   processing
   success
   failed
+  human_verified
 }
 
 model DocumentTemplate {
@@ -87,4 +88,19 @@ model FileExtraction {
   @@index([runId])
   @@index([status])
   @@map("file_extractions")
+}
+
+model VerifiedFieldExample {
+  id                String   @id @default(uuid()) @db.Uuid
+  templateId        String   @map("template_id")
+  fieldId           String   @map("field_id")
+  inputContextChunk String   @map("input_context_chunk") @db.Text
+  contextHash       String   @map("context_hash")
+  correctedValue    Json     @map("corrected_value")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  @@unique([templateId, fieldId, contextHash], map: "verified_field_examples_template_field_context_key")
+  @@index([templateId, fieldId, updatedAt], map: "verified_field_examples_template_field_updated_idx")
+  @@map("verified_field_examples")
 }
